@@ -90,7 +90,7 @@ def scrape_reviews_with_progress(job_id, product_url, max_pages=50):
         job['status'] = 'loading'
         job['message'] = 'Loading product page...'
         driver.get(product_url)
-        time.sleep(5)
+        time.sleep(3)  # Reduced from 5s
 
         # Extract product title and image
         job['message'] = 'Extracting product info...'
@@ -133,18 +133,18 @@ def scrape_reviews_with_progress(job_id, product_url, max_pages=50):
         job['message'] = 'Finding reviews section...'
         for i in range(5):
             driver.execute_script(f"window.scrollTo(0, document.body.scrollHeight * {0.3 + i*0.15});")
-            time.sleep(0.8)
+            time.sleep(0.4)  # Reduced from 0.8s
 
         driver.execute_script("""
             const ratingEl = document.querySelector('[aria-label*="Rating:"][aria-label*="out of 5 stars"]');
             if (ratingEl) ratingEl.scrollIntoView({block: 'center', behavior: 'smooth'});
         """)
-        time.sleep(2)
+        time.sleep(1)  # Reduced from 2s
 
         # Scroll to bottom for pagination
         for _ in range(10):
             driver.execute_script("window.scrollBy(0, 800);")
-            time.sleep(0.4)
+            time.sleep(0.2)  # Reduced from 0.4s
 
         job['status'] = 'scraping'
         current_page = 1
@@ -242,7 +242,7 @@ def scrape_reviews_with_progress(job_id, product_url, max_pages=50):
 
             # Click Next button
             driver.execute_script("window.scrollBy(0, 400);")
-            time.sleep(0.5)
+            time.sleep(0.3)  # Reduced from 0.5s
 
             clicked = driver.execute_script("""
                 const allElements = document.querySelectorAll('button, a, span, div, li, [role="button"]');
@@ -275,7 +275,7 @@ def scrape_reviews_with_progress(job_id, product_url, max_pages=50):
             """)
 
             if clicked:
-                time.sleep(2)
+                time.sleep(1.2)  # Reduced from 2s
                 current_page += 1
             else:
                 # Try scroll-based or stop
