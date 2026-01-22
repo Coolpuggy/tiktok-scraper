@@ -259,42 +259,94 @@ def scrape_reviews_with_progress(job_id, product_url, max_pages=50):
             if current_page >= max_pages:
                 break
 
-            # Click Next button
+            # Click Next button - try multiple times with different strategies
             driver.execute_script("window.scrollBy(0, 400);")
-            time.sleep(0.3)  # Reduced from 0.5s
+            time.sleep(0.5)
 
-            clicked = driver.execute_script("""
-                const allElements = document.querySelectorAll('button, a, span, div, li, [role="button"]');
+            clicked = False
+            retry_count = 0
+            max_retries = 3
 
-                for (const el of allElements) {
-                    const text = el.innerText?.trim();
-                    if (text === 'Next' || text === 'Next →' || text === 'Next→') {
-                        const rect = el.getBoundingClientRect();
-                        if (rect.width > 0 && rect.height > 0 && rect.top > 200) {
-                            el.scrollIntoView({block: 'center'});
-                            el.click();
-                            el.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true, view: window}));
-                            return true;
+            while not clicked and retry_count < max_retries:
+                clicked = driver.execute_script("""
+                    // Strategy 1: Look for pagination buttons with specific text
+                    const allElements = document.querySelectorAll('button, a, span, div, li, [role="button"]');
+
+                    for (const el of allElements) {
+                        const text = el.innerText?.trim();
+                        if (text === 'Next' || text === 'Next →' || text === 'Next→' || text === 'next') {
+                            const rect = el.getBoundingClientRect();
+                            if (rect.width > 0 && rect.height > 0 && rect.top > 200) {
+                                el.scrollIntoView({block: 'center'});
+                                el.click();
+                                el.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true, view: window}));
+                                return true;
+                            }
                         }
                     }
-                }
 
-                for (const el of allElements) {
-                    const text = el.innerText?.trim();
-                    if (text === '→' || text === '>' || text === '›') {
-                        const rect = el.getBoundingClientRect();
-                        if (rect.width > 0 && rect.height > 0 && rect.top > 200) {
-                            el.scrollIntoView({block: 'center'});
-                            el.click();
-                            return true;
+                    // Strategy 2: Look for arrow symbols
+                    for (const el of allElements) {
+                        const text = el.innerText?.trim();
+                        if (text === '→' || text === '>' || text === '›' || text === '»') {
+                            const rect = el.getBoundingClientRect();
+                            if (rect.width > 0 && rect.height > 0 && rect.top > 200) {
+                                el.scrollIntoView({block: 'center'});
+                                el.click();
+                                return true;
+                            }
                         }
                     }
-                }
-                return false;
-            """)
+
+                    // Strategy 3: Look for pagination container and find next button
+                    const paginationContainers = document.querySelectorAll('[class*="pagination"], [class*="Pagination"], [class*="pager"], [class*="Pager"]');
+                    for (const container of paginationContainers) {
+                        const buttons = container.querySelectorAll('button, a, li, span');
+                        const buttonArray = Array.from(buttons);
+
+                        // Find the active/current page and click the next one
+                        for (let i = 0; i < buttonArray.length; i++) {
+                            const btn = buttonArray[i];
+                            if (btn.classList.contains('active') || btn.getAttribute('aria-current') === 'true' ||
+                                btn.classList.contains('selected') || btn.classList.contains('current')) {
+                                // Click the next sibling if it exists
+                                if (buttonArray[i + 1]) {
+                                    buttonArray[i + 1].scrollIntoView({block: 'center'});
+                                    buttonArray[i + 1].click();
+                                    return true;
+                                }
+                            }
+                        }
+                    }
+
+                    // Strategy 4: Look for SVG arrow icons in buttons
+                    const svgButtons = document.querySelectorAll('button svg, a svg');
+                    for (const svg of svgButtons) {
+                        const parent = svg.closest('button, a');
+                        if (parent) {
+                            const rect = parent.getBoundingClientRect();
+                            // Check if it's likely a "next" button (on the right side of pagination)
+                            if (rect.width > 0 && rect.height > 0 && rect.top > 200) {
+                                const siblingText = parent.parentElement?.innerText || '';
+                                if (siblingText.includes('Next') || parent.getAttribute('aria-label')?.toLowerCase().includes('next')) {
+                                    parent.scrollIntoView({block: 'center'});
+                                    parent.click();
+                                    return true;
+                                }
+                            }
+                        }
+                    }
+
+                    return false;
+                """)
+
+                if not clicked:
+                    retry_count += 1
+                    time.sleep(0.5)
+                    driver.execute_script("window.scrollBy(0, 200);")
 
             if clicked:
-                time.sleep(1.2)  # Reduced from 2s
+                time.sleep(1.5)  # Wait for new page to load
                 current_page += 1
             else:
                 # Try scroll-based or stop
