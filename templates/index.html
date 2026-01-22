@@ -1,0 +1,630 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TikTok Shop Review Scraper</title>
+    <style>
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            min-height: 100vh;
+            color: #fff;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 900px;
+            margin: 0 auto;
+        }
+
+        h1 {
+            text-align: center;
+            margin-bottom: 10px;
+            font-size: 2.2rem;
+            background: linear-gradient(90deg, #ff6b6b, #ee5a24, #ff6b6b);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+
+        .subtitle {
+            text-align: center;
+            color: #888;
+            margin-bottom: 30px;
+        }
+
+        .input-section {
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 16px;
+            padding: 30px;
+            margin-bottom: 20px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        .input-group {
+            margin-bottom: 20px;
+        }
+
+        .input-group label {
+            display: block;
+            margin-bottom: 8px;
+            color: #ccc;
+            font-size: 0.9rem;
+        }
+
+        .url-input {
+            width: 100%;
+            padding: 15px 20px;
+            border: 2px solid rgba(255, 255, 255, 0.1);
+            border-radius: 12px;
+            background: rgba(0, 0, 0, 0.3);
+            color: #fff;
+            font-size: 1rem;
+            transition: border-color 0.3s;
+        }
+
+        .url-input:focus {
+            outline: none;
+            border-color: #ff6b6b;
+        }
+
+        .url-input::placeholder {
+            color: #666;
+        }
+
+        .options-row {
+            display: flex;
+            gap: 20px;
+            align-items: flex-end;
+        }
+
+        .options-row .input-group {
+            flex: 1;
+            margin-bottom: 0;
+        }
+
+        .pages-input {
+            width: 100%;
+            padding: 15px 20px;
+            border: 2px solid rgba(255, 255, 255, 0.1);
+            border-radius: 12px;
+            background: rgba(0, 0, 0, 0.3);
+            color: #fff;
+            font-size: 1rem;
+        }
+
+        .pages-input:focus {
+            outline: none;
+            border-color: #ff6b6b;
+        }
+
+        .start-btn {
+            padding: 15px 40px;
+            background: linear-gradient(90deg, #ff6b6b, #ee5a24);
+            border: none;
+            border-radius: 12px;
+            color: #fff;
+            font-size: 1rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: transform 0.2s, box-shadow 0.2s;
+            white-space: nowrap;
+        }
+
+        .start-btn:hover:not(:disabled) {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 30px rgba(238, 90, 36, 0.3);
+        }
+
+        .start-btn:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+        }
+
+        .progress-section {
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 16px;
+            padding: 30px;
+            margin-bottom: 20px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            display: none;
+        }
+
+        .progress-section.active {
+            display: block;
+        }
+
+        .progress-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 15px;
+        }
+
+        .progress-status {
+            font-size: 1.1rem;
+            color: #fff;
+        }
+
+        .progress-count {
+            color: #ff6b6b;
+            font-weight: 600;
+        }
+
+        .progress-bar-container {
+            background: rgba(0, 0, 0, 0.3);
+            border-radius: 10px;
+            height: 20px;
+            overflow: hidden;
+        }
+
+        .progress-bar {
+            height: 100%;
+            background: linear-gradient(90deg, #ff6b6b, #ee5a24);
+            border-radius: 10px;
+            width: 0%;
+            transition: width 0.3s ease;
+        }
+
+        .progress-details {
+            margin-top: 10px;
+            color: #888;
+            font-size: 0.9rem;
+        }
+
+        .results-section {
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 16px;
+            padding: 30px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            display: none;
+        }
+
+        .results-section.active {
+            display: block;
+        }
+
+        .results-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+        }
+
+        .results-header h2 {
+            font-size: 1.5rem;
+        }
+
+        .copy-btn {
+            padding: 10px 20px;
+            background: rgba(255, 255, 255, 0.1);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            border-radius: 8px;
+            color: #fff;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+
+        .copy-btn:hover {
+            background: rgba(255, 255, 255, 0.2);
+        }
+
+        .copy-btn.copied {
+            background: #27ae60;
+            border-color: #27ae60;
+        }
+
+        .reviews-container {
+            background: rgba(0, 0, 0, 0.3);
+            border-radius: 12px;
+            max-height: 500px;
+            overflow: hidden;
+            position: relative;
+        }
+
+        .reviews-container.collapsed {
+            max-height: 400px;
+        }
+
+        .reviews-container.collapsed::after {
+            content: '';
+            position: absolute;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            height: 100px;
+            background: linear-gradient(transparent, rgba(0, 0, 0, 0.8));
+            pointer-events: none;
+        }
+
+        .reviews-list {
+            padding: 20px;
+            overflow-y: auto;
+            max-height: 500px;
+        }
+
+        .reviews-container.collapsed .reviews-list {
+            max-height: 400px;
+            overflow: hidden;
+        }
+
+        .review-card {
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 10px;
+            padding: 15px;
+            margin-bottom: 15px;
+            border-left: 3px solid #ff6b6b;
+        }
+
+        .review-card:last-child {
+            margin-bottom: 0;
+        }
+
+        .review-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 10px;
+        }
+
+        .review-user {
+            font-weight: 600;
+            color: #ff6b6b;
+        }
+
+        .review-date {
+            color: #888;
+            font-size: 0.85rem;
+        }
+
+        .review-rating {
+            margin-bottom: 10px;
+        }
+
+        .star {
+            color: #ffd700;
+            font-size: 1rem;
+        }
+
+        .star.empty {
+            color: #444;
+        }
+
+        .review-text {
+            color: #ddd;
+            line-height: 1.6;
+        }
+
+        .expand-btn {
+            display: block;
+            width: 100%;
+            padding: 15px;
+            background: linear-gradient(90deg, rgba(255, 107, 107, 0.2), rgba(238, 90, 36, 0.2));
+            border: 1px solid rgba(255, 107, 107, 0.3);
+            border-radius: 0 0 12px 12px;
+            color: #ff6b6b;
+            font-size: 1rem;
+            cursor: pointer;
+            transition: background 0.2s;
+            margin-top: -1px;
+        }
+
+        .expand-btn:hover {
+            background: linear-gradient(90deg, rgba(255, 107, 107, 0.3), rgba(238, 90, 36, 0.3));
+        }
+
+        .text-output {
+            background: rgba(0, 0, 0, 0.4);
+            border-radius: 12px;
+            padding: 20px;
+            font-family: 'Consolas', 'Monaco', monospace;
+            font-size: 0.9rem;
+            color: #ccc;
+            white-space: pre-wrap;
+            max-height: 300px;
+            overflow-y: auto;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            margin-top: 20px;
+        }
+
+        .error-message {
+            background: rgba(231, 76, 60, 0.2);
+            border: 1px solid rgba(231, 76, 60, 0.5);
+            border-radius: 12px;
+            padding: 20px;
+            color: #e74c3c;
+            margin-bottom: 20px;
+            display: none;
+        }
+
+        .error-message.active {
+            display: block;
+        }
+
+        @media (max-width: 600px) {
+            .options-row {
+                flex-direction: column;
+            }
+
+            .start-btn {
+                width: 100%;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>TikTok Shop Review Scraper</h1>
+        <p class="subtitle">Extract product reviews with one click</p>
+
+        <div class="error-message" id="errorMessage"></div>
+
+        <div class="input-section">
+            <div class="input-group">
+                <label for="urlInput">Product URL</label>
+                <input
+                    type="text"
+                    id="urlInput"
+                    class="url-input"
+                    placeholder="https://www.tiktok.com/shop/pdp/product-name/1234567890123456789"
+                >
+            </div>
+            <div class="options-row">
+                <div class="input-group">
+                    <label for="pagesInput">Max Pages to Scrape</label>
+                    <input
+                        type="number"
+                        id="pagesInput"
+                        class="pages-input"
+                        value="50"
+                        min="1"
+                        max="200"
+                    >
+                </div>
+                <button class="start-btn" id="startBtn" onclick="startScraping()">
+                    Start Scraping
+                </button>
+            </div>
+        </div>
+
+        <div class="progress-section" id="progressSection">
+            <div class="progress-header">
+                <span class="progress-status" id="progressStatus">Starting...</span>
+                <span class="progress-count" id="progressCount">0 reviews</span>
+            </div>
+            <div class="progress-bar-container">
+                <div class="progress-bar" id="progressBar"></div>
+            </div>
+            <div class="progress-details" id="progressDetails">Initializing browser...</div>
+        </div>
+
+        <div class="results-section" id="resultsSection">
+            <div class="results-header">
+                <h2>Results</h2>
+                <button class="copy-btn" id="copyBtn" onclick="copyResults()">
+                    Copy All
+                </button>
+            </div>
+            <div class="reviews-container collapsed" id="reviewsContainer">
+                <div class="reviews-list" id="reviewsList"></div>
+            </div>
+            <button class="expand-btn" id="expandBtn" onclick="toggleExpand()">
+                Show All Reviews
+            </button>
+            <div class="text-output" id="textOutput"></div>
+        </div>
+    </div>
+
+    <script>
+        let currentJobId = null;
+        let allReviews = [];
+        let eventSource = null;
+
+        function showError(message) {
+            const errorEl = document.getElementById('errorMessage');
+            errorEl.textContent = message;
+            errorEl.classList.add('active');
+            setTimeout(() => errorEl.classList.remove('active'), 5000);
+        }
+
+        async function startScraping() {
+            const url = document.getElementById('urlInput').value.trim();
+            const maxPages = parseInt(document.getElementById('pagesInput').value) || 50;
+
+            if (!url) {
+                showError('Please enter a TikTok Shop product URL');
+                return;
+            }
+
+            // Reset UI
+            document.getElementById('startBtn').disabled = true;
+            document.getElementById('startBtn').textContent = 'Scraping...';
+            document.getElementById('progressSection').classList.add('active');
+            document.getElementById('resultsSection').classList.remove('active');
+            document.getElementById('progressBar').style.width = '0%';
+            document.getElementById('progressStatus').textContent = 'Starting...';
+            document.getElementById('progressCount').textContent = '0 reviews';
+            document.getElementById('progressDetails').textContent = 'Initializing...';
+
+            try {
+                const response = await fetch('/start', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ url, max_pages: maxPages })
+                });
+
+                const data = await response.json();
+
+                if (data.error) {
+                    showError(data.error);
+                    resetUI();
+                    return;
+                }
+
+                currentJobId = data.job_id;
+                startEventStream(currentJobId);
+
+            } catch (error) {
+                showError('Failed to start scraping: ' + error.message);
+                resetUI();
+            }
+        }
+
+        function startEventStream(jobId) {
+            if (eventSource) {
+                eventSource.close();
+            }
+
+            eventSource = new EventSource(`/stream/${jobId}`);
+
+            eventSource.onmessage = function(event) {
+                const data = JSON.parse(event.data);
+
+                if (data.error) {
+                    showError(data.error);
+                    resetUI();
+                    eventSource.close();
+                    return;
+                }
+
+                updateProgress(data);
+
+                if (data.status === 'complete') {
+                    allReviews = data.reviews || [];
+                    showResults(allReviews);
+                    resetUI();
+                    eventSource.close();
+                } else if (data.status === 'error') {
+                    showError(data.message);
+                    resetUI();
+                    eventSource.close();
+                }
+            };
+
+            eventSource.onerror = function() {
+                // Poll fallback if SSE fails
+                pollStatus(jobId);
+                eventSource.close();
+            };
+        }
+
+        async function pollStatus(jobId) {
+            try {
+                const response = await fetch(`/status/${jobId}`);
+                const data = await response.json();
+
+                updateProgress(data);
+
+                if (data.status === 'complete') {
+                    allReviews = data.reviews || [];
+                    showResults(allReviews);
+                    resetUI();
+                } else if (data.status === 'error') {
+                    showError(data.message);
+                    resetUI();
+                } else {
+                    setTimeout(() => pollStatus(jobId), 1000);
+                }
+            } catch (error) {
+                setTimeout(() => pollStatus(jobId), 2000);
+            }
+        }
+
+        function updateProgress(data) {
+            document.getElementById('progressBar').style.width = data.progress + '%';
+            document.getElementById('progressStatus').textContent = data.message;
+            document.getElementById('progressCount').textContent = data.review_count + ' reviews';
+            document.getElementById('progressDetails').textContent =
+                `Page ${data.current_page} of ${data.max_pages}`;
+        }
+
+        function showResults(reviews) {
+            document.getElementById('resultsSection').classList.add('active');
+
+            // Render review cards
+            const reviewsList = document.getElementById('reviewsList');
+            reviewsList.innerHTML = reviews.map((r, i) => `
+                <div class="review-card">
+                    <div class="review-header">
+                        <span class="review-user">${escapeHtml(r.username)}</span>
+                        <span class="review-date">${r.date || 'No date'}</span>
+                    </div>
+                    <div class="review-rating">
+                        ${renderStars(r.rating)}
+                    </div>
+                    <div class="review-text">${escapeHtml(r.review_text)}</div>
+                </div>
+            `).join('');
+
+            // Show expand button if more than 4 reviews
+            const expandBtn = document.getElementById('expandBtn');
+            const container = document.getElementById('reviewsContainer');
+            if (reviews.length > 4) {
+                expandBtn.style.display = 'block';
+                container.classList.add('collapsed');
+            } else {
+                expandBtn.style.display = 'none';
+                container.classList.remove('collapsed');
+            }
+
+            // Text output
+            const textOutput = reviews.map(r =>
+                `[${r.username}] ${'★'.repeat(r.rating)}${'☆'.repeat(5-r.rating)} ${r.date || ''}\n${r.review_text}`
+            ).join('\n\n---\n\n');
+            document.getElementById('textOutput').textContent = textOutput;
+        }
+
+        function renderStars(rating) {
+            let stars = '';
+            for (let i = 1; i <= 5; i++) {
+                stars += `<span class="star ${i <= rating ? '' : 'empty'}">★</span>`;
+            }
+            return stars;
+        }
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text || '';
+            return div.innerHTML;
+        }
+
+        function toggleExpand() {
+            const container = document.getElementById('reviewsContainer');
+            const btn = document.getElementById('expandBtn');
+
+            if (container.classList.contains('collapsed')) {
+                container.classList.remove('collapsed');
+                btn.textContent = 'Show Less';
+            } else {
+                container.classList.add('collapsed');
+                btn.textContent = 'Show All Reviews';
+            }
+        }
+
+        function copyResults() {
+            const textOutput = document.getElementById('textOutput').textContent;
+            navigator.clipboard.writeText(textOutput).then(() => {
+                const btn = document.getElementById('copyBtn');
+                btn.textContent = 'Copied!';
+                btn.classList.add('copied');
+                setTimeout(() => {
+                    btn.textContent = 'Copy All';
+                    btn.classList.remove('copied');
+                }, 2000);
+            });
+        }
+
+        function resetUI() {
+            document.getElementById('startBtn').disabled = false;
+            document.getElementById('startBtn').textContent = 'Start Scraping';
+        }
+    </script>
+</body>
+</html>
