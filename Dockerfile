@@ -34,5 +34,5 @@ ENV CHROME_BIN=/usr/bin/google-chrome
 # Expose port
 EXPOSE 5000
 
-# Run the app with gunicorn for production
-CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--workers", "2", "--threads", "4", "--timeout", "300", "app:app"]
+# Run the app with gunicorn for production (Railway uses PORT env var)
+CMD gunicorn --bind 0.0.0.0:${PORT:-5000} --workers 2 --threads 4 --timeout 300 app:app
