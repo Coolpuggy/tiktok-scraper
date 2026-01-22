@@ -269,7 +269,23 @@ def scrape_reviews_with_progress(job_id, product_url, max_pages=50):
             next_page_num = current_page + 1
 
             while not clicked and retry_count < max_retries:
-                # Simple, direct approach - just find and click page numbers or next button
+                # Debug: find what page numbers exist on the page
+                debug = driver.execute_script("""
+                    const found = [];
+                    const els = document.querySelectorAll('button, a, li, span, div');
+                    for (const el of els) {
+                        const text = el.innerText?.trim();
+                        if (/^\\d+$/.test(text) && parseInt(text) <= 100) {
+                            const rect = el.getBoundingClientRect();
+                            if (rect.width > 0 && rect.width < 100 && rect.height > 0 && rect.height < 80) {
+                                found.push({text: text, top: Math.round(rect.top), w: Math.round(rect.width), h: Math.round(rect.height)});
+                            }
+                        }
+                    }
+                    return found.slice(0, 20);
+                """)
+                print(f"[Page {current_page}] Page numbers found: {debug}")
+
                 clicked = driver.execute_script(f"""
                     const nextPageNum = {next_page_num};
                     const currentPageNum = {current_page};
@@ -284,17 +300,16 @@ def scrape_reviews_with_progress(job_id, product_url, max_pages=50):
                         }}
                     }}
 
-                    // Simple approach: scan all clickable elements for page numbers
+                    // Scan all clickable elements
                     const clickables = document.querySelectorAll('button, a, li, span, div, [role="button"]');
 
-                    // First pass: find exact next page number
+                    // First pass: find exact next page number (no minimum top restriction)
                     for (const el of clickables) {{
                         const text = el.innerText?.trim();
                         if (text === String(nextPageNum)) {{
                             const rect = el.getBoundingClientRect();
-                            // Must be visible, in lower half of page, and reasonably sized
-                            if (rect.top > 400 && rect.width > 10 && rect.width < 80 && rect.height > 10 && rect.height < 60) {{
-                                console.log('Found next page number:', nextPageNum);
+                            if (rect.width > 5 && rect.width < 100 && rect.height > 5 && rect.height < 80) {{
+                                console.log('Clicking next page:', nextPageNum, 'at top:', rect.top);
                                 return clickEl(el);
                             }}
                         }}
@@ -307,21 +322,21 @@ def scrape_reviews_with_progress(job_id, product_url, max_pages=50):
                             const num = parseInt(text);
                             if (num > currentPageNum && num <= currentPageNum + 5) {{
                                 const rect = el.getBoundingClientRect();
-                                if (rect.top > 400 && rect.width > 10 && rect.width < 80 && rect.height > 10 && rect.height < 60) {{
-                                    console.log('Found higher page number:', num);
+                                if (rect.width > 5 && rect.width < 100 && rect.height > 5 && rect.height < 80) {{
+                                    console.log('Clicking higher page:', num);
                                     return clickEl(el);
                                 }}
                             }}
                         }}
                     }}
 
-                    // Third pass: find "Next" button by text
+                    // Third pass: find "Next" button
                     for (const el of clickables) {{
                         const text = (el.innerText?.trim() || '').toLowerCase();
-                        if (text === 'next' || text === 'next page' || text === '›' || text === '»' || text === '>') {{
+                        if (text === 'next' || text === '›' || text === '»' || text === '>') {{
                             const rect = el.getBoundingClientRect();
-                            if (rect.top > 400 && rect.width > 0 && rect.height > 0) {{
-                                console.log('Found Next button');
+                            if (rect.width > 0 && rect.height > 0) {{
+                                console.log('Clicking Next button');
                                 return clickEl(el);
                             }}
                         }}
@@ -330,10 +345,10 @@ def scrape_reviews_with_progress(job_id, product_url, max_pages=50):
                     // Fourth pass: find by aria-label
                     for (const el of clickables) {{
                         const aria = (el.getAttribute('aria-label') || '').toLowerCase();
-                        if (aria.includes('next') || aria.includes('page ' + nextPageNum)) {{
+                        if (aria.includes('next') || aria === 'page ' + nextPageNum) {{
                             const rect = el.getBoundingClientRect();
-                            if (rect.top > 400 && rect.width > 0) {{
-                                console.log('Found by aria-label');
+                            if (rect.width > 0) {{
+                                console.log('Clicking by aria-label');
                                 return clickEl(el);
                             }}
                         }}
@@ -344,23 +359,21 @@ def scrape_reviews_with_progress(job_id, product_url, max_pages=50):
                         const text = el.innerText?.trim();
                         if (text === String(currentPageNum)) {{
                             const rect = el.getBoundingClientRect();
-                            if (rect.top > 400 && rect.width < 80) {{
-                                // Try next sibling
+                            if (rect.width > 5 && rect.width < 100) {{
                                 let next = el.nextElementSibling;
                                 while (next) {{
                                     const nextRect = next.getBoundingClientRect();
                                     if (nextRect.width > 0 && nextRect.height > 0) {{
-                                        console.log('Clicking sibling of current page');
+                                        console.log('Clicking sibling');
                                         return clickEl(next);
                                     }}
                                     next = next.nextElementSibling;
                                 }}
-                                // Try parent's next sibling
                                 if (el.parentElement?.nextElementSibling) {{
                                     const parentNext = el.parentElement.nextElementSibling;
                                     const pnRect = parentNext.getBoundingClientRect();
                                     if (pnRect.width > 0) {{
-                                        console.log('Clicking parent sibling of current page');
+                                        console.log('Clicking parent sibling');
                                         return clickEl(parentNext);
                                     }}
                                 }}
