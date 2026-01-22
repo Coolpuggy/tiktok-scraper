@@ -269,11 +269,30 @@ def scrape_reviews_with_progress(job_id, product_url, max_pages=50):
             next_page_num = current_page + 1
 
             while not clicked and retry_count < max_retries:
+                # Debug: log what pagination elements exist
+                debug_info = driver.execute_script("""
+                    const found = [];
+                    const allElements = document.querySelectorAll('*');
+                    for (const el of allElements) {
+                        const text = el.innerText?.trim();
+                        const rect = el.getBoundingClientRect();
+                        if (rect.width > 0 && rect.height > 0 && rect.top > 300 && rect.height < 100) {
+                            if (/^\\d+$/.test(text) && parseInt(text) <= 200) {
+                                found.push({type: 'num', text: text, tag: el.tagName});
+                            }
+                            if (/next/i.test(text) || /next/i.test(el.getAttribute('aria-label') || '')) {
+                                found.push({type: 'next', text: text || el.getAttribute('aria-label'), tag: el.tagName});
+                            }
+                        }
+                    }
+                    return found.slice(0, 30);
+                """)
+                print(f"[Page {current_page}] Pagination elements: {debug_info}")
+
                 clicked = driver.execute_script(f"""
                     const nextPageNum = {next_page_num};
                     const currentPageNum = {current_page};
 
-                    // Helper to click reliably
                     function clickEl(el) {{
                         el.scrollIntoView({{block: 'center'}});
                         el.click();
@@ -281,118 +300,84 @@ def scrape_reviews_with_progress(job_id, product_url, max_pages=50):
                         return true;
                     }}
 
-                    // Find the pagination container first - look for elements with page numbers
-                    let paginationContainer = null;
                     const allElements = document.querySelectorAll('button, a, span, div, li, [role="button"]');
 
-                    // Find where page numbers are to locate the pagination area
-                    for (const el of allElements) {{
-                        const text = el.innerText?.trim();
-                        if (text === String(currentPageNum) || text === '1') {{
-                            const rect = el.getBoundingClientRect();
-                            if (rect.width > 0 && rect.height > 0 && rect.top > 300) {{
-                                // Found a page number, get its parent container
-                                paginationContainer = el.parentElement?.parentElement?.parentElement;
-                                break;
-                            }}
-                        }}
-                    }}
+                    // TikTok pagination behavior:
+                    // - Pages 1-5: Shows [1][2][3][4][5][Next]
+                    // - After page 5: Sliding window shows nearby numbers like [6][7][8][9][10]
 
-                    // Strategy 1 (PRIORITY): Find the LAST clickable element in pagination (right arrow/next)
-                    // TikTok pagination typically has: [<] [1] [2] [3] ... [>]
-                    // The last clickable element is usually the "next" arrow
-                    if (paginationContainer) {{
-                        const paginationButtons = paginationContainer.querySelectorAll('button, a, span[role="button"], li, [role="button"]');
-                        const visibleButtons = [];
-                        for (const btn of paginationButtons) {{
-                            const rect = btn.getBoundingClientRect();
-                            if (rect.width > 10 && rect.height > 10) {{
-                                visibleButtons.push(btn);
-                            }}
-                        }}
-                        // The rightmost button (last one) should be "next"
-                        if (visibleButtons.length > 0) {{
-                            const lastBtn = visibleButtons[visibleButtons.length - 1];
-                            const text = lastBtn.innerText?.trim();
-                            // Make sure it's not a page number (it should be arrow or empty for SVG)
-                            if (!text || text === '›' || text === '»' || text === '→' || text === '>' || !/^\\d+$/.test(text)) {{
-                                return clickEl(lastBtn);
-                            }}
-                        }}
-                    }}
-
-                    // Strategy 2: Look for SVG-based arrow buttons (common in modern UIs)
-                    // Find buttons that contain SVG with a rightward-pointing path
-                    const buttonsWithSvg = document.querySelectorAll('button, [role="button"]');
-                    for (const btn of buttonsWithSvg) {{
-                        const svg = btn.querySelector('svg');
-                        if (svg) {{
-                            const rect = btn.getBoundingClientRect();
-                            if (rect.width > 0 && rect.height > 0 && rect.top > 300) {{
-                                // Check if this button is to the RIGHT of page numbers
-                                // by checking if there's a page number element to its left
-                                const btnCenter = rect.left + rect.width / 2;
-                                let hasPageNumToLeft = false;
-                                for (const el of allElements) {{
-                                    const t = el.innerText?.trim();
-                                    if (/^\\d+$/.test(t)) {{
-                                        const r = el.getBoundingClientRect();
-                                        if (r.width > 0 && r.left < btnCenter && Math.abs(r.top - rect.top) < 50) {{
-                                            hasPageNumToLeft = true;
-                                            break;
-                                        }}
-                                    }}
-                                }}
-                                if (hasPageNumToLeft) {{
-                                    return clickEl(btn);
-                                }}
-                            }}
-                        }}
-                    }}
-
-                    // Strategy 3: Look for right arrow/chevron text symbols
-                    for (const el of allElements) {{
-                        const text = el.innerText?.trim();
-                        if (text === '›' || text === '»' || text === '→' || text === '>') {{
-                            const rect = el.getBoundingClientRect();
-                            if (rect.width > 0 && rect.height > 0 && rect.top > 300) {{
-                                return clickEl(el);
-                            }}
-                        }}
-                    }}
-
-                    // Strategy 4: Click next page number if visible (sliding window shows nearby pages)
+                    // Strategy 1: Click next page number if visible (works after page 5)
                     for (const el of allElements) {{
                         const text = el.innerText?.trim();
                         if (text === String(nextPageNum)) {{
                             const rect = el.getBoundingClientRect();
-                            if (rect.width > 0 && rect.height > 0 && rect.top > 300) {{
+                            if (rect.width > 0 && rect.height > 0 && rect.height < 100 && rect.top > 300) {{
                                 return clickEl(el);
                             }}
                         }}
                     }}
 
-                    // Strategy 5: Find buttons/links with aria-label containing "next"
-                    for (const el of allElements) {{
-                        const ariaLabel = (el.getAttribute('aria-label') || '').toLowerCase();
-                        if (ariaLabel.includes('next') && !ariaLabel.includes('prev')) {{
-                            const rect = el.getBoundingClientRect();
-                            if (rect.width > 0 && rect.height > 0 && rect.top > 300) {{
-                                return clickEl(el);
-                            }}
-                        }}
-                    }}
-
-                    // Strategy 6: Find any visible page number higher than current
+                    // Strategy 2: Click any higher page number visible
                     for (const el of allElements) {{
                         const text = el.innerText?.trim();
                         if (/^\\d+$/.test(text)) {{
                             const pageNum = parseInt(text);
-                            if (pageNum === currentPageNum + 1 || pageNum === currentPageNum + 2) {{
+                            if (pageNum > currentPageNum && pageNum <= currentPageNum + 10) {{
                                 const rect = el.getBoundingClientRect();
-                                if (rect.width > 0 && rect.height > 0 && rect.top > 300) {{
+                                if (rect.width > 0 && rect.height > 0 && rect.height < 100 && rect.top > 300) {{
                                     return clickEl(el);
                                 }}
+                            }}
+                        }}
+                    }}
+
+                    // Strategy 3: Click "Next" button (critical for pages 1-5 where not all numbers show)
+                    // Look for elements with "Next" text or aria-label
+                    for (const el of allElements) {{
+                        const text = (el.innerText?.trim() || '').toLowerCase();
+                        const ariaLabel = (el.getAttribute('aria-label') || '').toLowerCase();
+
+                        if (text === 'next' || text === 'next page' ||
+                            ariaLabel === 'next' || ariaLabel === 'next page' ||
+                            ariaLabel.includes('go to next')) {{
+                            const rect = el.getBoundingClientRect();
+                            if (rect.width > 0 && rect.height > 0 && rect.height < 100 && rect.top > 300) {{
+                                return clickEl(el);
+                            }}
+                        }}
+                    }}
+
+                    // Strategy 4: Look for button/link immediately AFTER the highest visible page number
+                    // This catches arrow buttons that don't have text
+                    let highestPageEl = null;
+                    let highestPage = 0;
+                    for (const el of allElements) {{
+                        const text = el.innerText?.trim();
+                        if (/^\\d+$/.test(text)) {{
+                            const num = parseInt(text);
+                            const rect = el.getBoundingClientRect();
+                            if (num > highestPage && rect.width > 0 && rect.height > 0 && rect.height < 100 && rect.top > 300) {{
+                                highestPage = num;
+                                highestPageEl = el;
+                            }}
+                        }}
+                    }}
+
+                    if (highestPageEl) {{
+                        // Find the next sibling or nearby element that could be "next" button
+                        let nextEl = highestPageEl.nextElementSibling;
+                        if (nextEl) {{
+                            const rect = nextEl.getBoundingClientRect();
+                            if (rect.width > 0 && rect.height > 0) {{
+                                return clickEl(nextEl);
+                            }}
+                        }}
+                        // Try parent's next sibling
+                        const parent = highestPageEl.parentElement;
+                        if (parent && parent.nextElementSibling) {{
+                            const rect = parent.nextElementSibling.getBoundingClientRect();
+                            if (rect.width > 0 && rect.height > 0) {{
+                                return clickEl(parent.nextElementSibling);
                             }}
                         }}
                     }}
