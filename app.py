@@ -266,76 +266,120 @@ def scrape_reviews_with_progress(job_id, product_url, max_pages=50):
             clicked = False
             retry_count = 0
             max_retries = 3
+            next_page_num = current_page + 1
 
             while not clicked and retry_count < max_retries:
-                clicked = driver.execute_script("""
-                    // Strategy 1: Look for pagination buttons with specific text
+                clicked = driver.execute_script(f"""
+                    const nextPageNum = {next_page_num};
+
+                    // Strategy 1: Click the next page number directly (most reliable)
                     const allElements = document.querySelectorAll('button, a, span, div, li, [role="button"]');
-
-                    for (const el of allElements) {
+                    for (const el of allElements) {{
                         const text = el.innerText?.trim();
-                        if (text === 'Next' || text === 'Next →' || text === 'Next→' || text === 'next') {
+                        // Match exact page number
+                        if (text === String(nextPageNum)) {{
                             const rect = el.getBoundingClientRect();
-                            if (rect.width > 0 && rect.height > 0 && rect.top > 200) {
-                                el.scrollIntoView({block: 'center'});
+                            if (rect.width > 0 && rect.height > 0 && rect.top > 200) {{
+                                el.scrollIntoView({{block: 'center'}});
                                 el.click();
-                                el.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true, view: window}));
+                                el.dispatchEvent(new MouseEvent('click', {{bubbles: true, cancelable: true, view: window}}));
                                 return true;
-                            }
-                        }
-                    }
+                            }}
+                        }}
+                    }}
 
-                    // Strategy 2: Look for arrow symbols
-                    for (const el of allElements) {
+                    // Strategy 2: Look for pagination buttons with "Next" text
+                    for (const el of allElements) {{
                         const text = el.innerText?.trim();
-                        if (text === '→' || text === '>' || text === '›' || text === '»') {
+                        if (text === 'Next' || text === 'Next →' || text === 'Next→' || text === 'next') {{
                             const rect = el.getBoundingClientRect();
-                            if (rect.width > 0 && rect.height > 0 && rect.top > 200) {
-                                el.scrollIntoView({block: 'center'});
+                            if (rect.width > 0 && rect.height > 0 && rect.top > 200) {{
+                                el.scrollIntoView({{block: 'center'}});
+                                el.click();
+                                el.dispatchEvent(new MouseEvent('click', {{bubbles: true, cancelable: true, view: window}}));
+                                return true;
+                            }}
+                        }}
+                    }}
+
+                    // Strategy 3: Look for arrow symbols
+                    for (const el of allElements) {{
+                        const text = el.innerText?.trim();
+                        if (text === '→' || text === '>' || text === '›' || text === '»') {{
+                            const rect = el.getBoundingClientRect();
+                            if (rect.width > 0 && rect.height > 0 && rect.top > 200) {{
+                                el.scrollIntoView({{block: 'center'}});
                                 el.click();
                                 return true;
-                            }
-                        }
-                    }
+                            }}
+                        }}
+                    }}
 
-                    // Strategy 3: Look for pagination container and find next button
-                    const paginationContainers = document.querySelectorAll('[class*="pagination"], [class*="Pagination"], [class*="pager"], [class*="Pager"]');
-                    for (const container of paginationContainers) {
+                    // Strategy 4: Look for pagination container and find next button by position
+                    const paginationContainers = document.querySelectorAll('[class*="pagination"], [class*="Pagination"], [class*="pager"], [class*="Pager"], [class*="PageList"], [class*="page-list"]');
+                    for (const container of paginationContainers) {{
                         const buttons = container.querySelectorAll('button, a, li, span');
                         const buttonArray = Array.from(buttons);
 
                         // Find the active/current page and click the next one
-                        for (let i = 0; i < buttonArray.length; i++) {
+                        for (let i = 0; i < buttonArray.length; i++) {{
                             const btn = buttonArray[i];
+                            const text = btn.innerText?.trim();
+                            // Check if this is the current page
                             if (btn.classList.contains('active') || btn.getAttribute('aria-current') === 'true' ||
-                                btn.classList.contains('selected') || btn.classList.contains('current')) {
-                                // Click the next sibling if it exists
-                                if (buttonArray[i + 1]) {
-                                    buttonArray[i + 1].scrollIntoView({block: 'center'});
-                                    buttonArray[i + 1].click();
-                                    return true;
-                                }
-                            }
-                        }
-                    }
+                                btn.classList.contains('selected') || btn.classList.contains('current') ||
+                                btn.closest('[class*="active"]') || btn.closest('[class*="current"]')) {{
+                                // Click the next sibling if it exists and it's a number
+                                if (buttonArray[i + 1]) {{
+                                    const nextText = buttonArray[i + 1].innerText?.trim();
+                                    if (/^\\d+$/.test(nextText) || nextText === 'Next' || nextText === '›' || nextText === '>') {{
+                                        buttonArray[i + 1].scrollIntoView({{block: 'center'}});
+                                        buttonArray[i + 1].click();
+                                        return true;
+                                    }}
+                                }}
+                            }}
+                        }}
+                    }}
 
-                    // Strategy 4: Look for SVG arrow icons in buttons
+                    // Strategy 5: Look for SVG arrow icons in buttons
                     const svgButtons = document.querySelectorAll('button svg, a svg');
-                    for (const svg of svgButtons) {
+                    for (const svg of svgButtons) {{
                         const parent = svg.closest('button, a');
-                        if (parent) {
+                        if (parent) {{
                             const rect = parent.getBoundingClientRect();
-                            // Check if it's likely a "next" button (on the right side of pagination)
-                            if (rect.width > 0 && rect.height > 0 && rect.top > 200) {
+                            if (rect.width > 0 && rect.height > 0 && rect.top > 200) {{
                                 const siblingText = parent.parentElement?.innerText || '';
-                                if (siblingText.includes('Next') || parent.getAttribute('aria-label')?.toLowerCase().includes('next')) {
-                                    parent.scrollIntoView({block: 'center'});
+                                const ariaLabel = parent.getAttribute('aria-label') || '';
+                                if (siblingText.includes('Next') || ariaLabel.toLowerCase().includes('next') ||
+                                    parent.classList.contains('next') || parent.closest('[class*="next"]')) {{
+                                    parent.scrollIntoView({{block: 'center'}});
                                     parent.click();
                                     return true;
-                                }
-                            }
-                        }
-                    }
+                                }}
+                            }}
+                        }}
+                    }}
+
+                    // Strategy 6: Look for any button/link that looks like it could be "next"
+                    // by checking if it's after a numbered button in the DOM
+                    const currentPageStr = String({current_page});
+                    for (const el of allElements) {{
+                        const text = el.innerText?.trim();
+                        if (text === currentPageStr) {{
+                            // Found current page, look for next sibling
+                            let sibling = el.nextElementSibling;
+                            while (sibling) {{
+                                const sibText = sibling.innerText?.trim();
+                                if (sibText && (sibText === String(nextPageNum) || sibText === 'Next' || sibText === '>' || sibText === '›')) {{
+                                    sibling.scrollIntoView({{block: 'center'}});
+                                    sibling.click();
+                                    return true;
+                                }}
+                                sibling = sibling.nextElementSibling;
+                            }}
+                        }}
+                    }}
 
                     return false;
                 """)
