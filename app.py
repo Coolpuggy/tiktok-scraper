@@ -259,13 +259,13 @@ def scrape_reviews_with_progress(job_id, product_url, max_pages=50):
             if current_page >= max_pages:
                 break
 
-            # Click Next button - try multiple times with different strategies
+            # Click Next button - prioritize the right arrow/chevron since page numbers slide
             driver.execute_script("window.scrollBy(0, 400);")
-            time.sleep(0.5)
+            time.sleep(0.8)
 
             clicked = False
             retry_count = 0
-            max_retries = 5  # Increased retries
+            max_retries = 3
             next_page_num = current_page + 1
 
             while not clicked and retry_count < max_retries:
@@ -273,120 +273,125 @@ def scrape_reviews_with_progress(job_id, product_url, max_pages=50):
                     const nextPageNum = {next_page_num};
                     const currentPageNum = {current_page};
 
-                    // Helper function to click an element reliably
-                    function clickElement(el) {{
-                        el.scrollIntoView({{block: 'center', behavior: 'instant'}});
-                        el.focus();
+                    // Helper to click reliably
+                    function clickEl(el) {{
+                        el.scrollIntoView({{block: 'center'}});
                         el.click();
                         el.dispatchEvent(new MouseEvent('click', {{bubbles: true, cancelable: true, view: window}}));
                         return true;
                     }}
 
-                    // Strategy 1: Find the rightmost arrow/chevron button in pagination area
-                    // This is often the most reliable "next" button
-                    const paginationArea = document.querySelector('[class*="pagination"], [class*="Pagination"], [class*="pager"], [class*="review"]');
-                    if (paginationArea) {{
-                        // Look for right arrow buttons (usually last clickable element)
-                        const arrows = paginationArea.querySelectorAll('button, a, [role="button"]');
-                        const arrowArray = Array.from(arrows);
-                        // Find buttons that look like "next" arrows (usually at the end)
-                        for (let i = arrowArray.length - 1; i >= 0; i--) {{
-                            const btn = arrowArray[i];
-                            const text = btn.innerText?.trim() || '';
-                            const ariaLabel = (btn.getAttribute('aria-label') || '').toLowerCase();
-                            const className = (btn.className || '').toLowerCase();
+                    // Find the pagination container first - look for elements with page numbers
+                    let paginationContainer = null;
+                    const allElements = document.querySelectorAll('button, a, span, div, li, [role="button"]');
 
-                            // Check if this looks like a next/forward button
-                            if (text === '›' || text === '>' || text === '»' || text === '→' ||
-                                ariaLabel.includes('next') || ariaLabel.includes('forward') ||
-                                className.includes('next') || className.includes('forward') ||
-                                btn.querySelector('svg[class*="right"], svg[class*="next"], svg[class*="arrow"]')) {{
-                                const rect = btn.getBoundingClientRect();
-                                if (rect.width > 0 && rect.height > 0 && !btn.disabled) {{
-                                    return clickElement(btn);
+                    // Find where page numbers are to locate the pagination area
+                    for (const el of allElements) {{
+                        const text = el.innerText?.trim();
+                        if (text === String(currentPageNum) || text === '1') {{
+                            const rect = el.getBoundingClientRect();
+                            if (rect.width > 0 && rect.height > 0 && rect.top > 300) {{
+                                // Found a page number, get its parent container
+                                paginationContainer = el.parentElement?.parentElement?.parentElement;
+                                break;
+                            }}
+                        }}
+                    }}
+
+                    // Strategy 1 (PRIORITY): Find the LAST clickable element in pagination (right arrow/next)
+                    // TikTok pagination typically has: [<] [1] [2] [3] ... [>]
+                    // The last clickable element is usually the "next" arrow
+                    if (paginationContainer) {{
+                        const paginationButtons = paginationContainer.querySelectorAll('button, a, span[role="button"], li, [role="button"]');
+                        const visibleButtons = [];
+                        for (const btn of paginationButtons) {{
+                            const rect = btn.getBoundingClientRect();
+                            if (rect.width > 10 && rect.height > 10) {{
+                                visibleButtons.push(btn);
+                            }}
+                        }}
+                        // The rightmost button (last one) should be "next"
+                        if (visibleButtons.length > 0) {{
+                            const lastBtn = visibleButtons[visibleButtons.length - 1];
+                            const text = lastBtn.innerText?.trim();
+                            // Make sure it's not a page number (it should be arrow or empty for SVG)
+                            if (!text || text === '›' || text === '»' || text === '→' || text === '>' || !/^\\d+$/.test(text)) {{
+                                return clickEl(lastBtn);
+                            }}
+                        }}
+                    }}
+
+                    // Strategy 2: Look for SVG-based arrow buttons (common in modern UIs)
+                    // Find buttons that contain SVG with a rightward-pointing path
+                    const buttonsWithSvg = document.querySelectorAll('button, [role="button"]');
+                    for (const btn of buttonsWithSvg) {{
+                        const svg = btn.querySelector('svg');
+                        if (svg) {{
+                            const rect = btn.getBoundingClientRect();
+                            if (rect.width > 0 && rect.height > 0 && rect.top > 300) {{
+                                // Check if this button is to the RIGHT of page numbers
+                                // by checking if there's a page number element to its left
+                                const btnCenter = rect.left + rect.width / 2;
+                                let hasPageNumToLeft = false;
+                                for (const el of allElements) {{
+                                    const t = el.innerText?.trim();
+                                    if (/^\\d+$/.test(t)) {{
+                                        const r = el.getBoundingClientRect();
+                                        if (r.width > 0 && r.left < btnCenter && Math.abs(r.top - rect.top) < 50) {{
+                                            hasPageNumToLeft = true;
+                                            break;
+                                        }}
+                                    }}
+                                }}
+                                if (hasPageNumToLeft) {{
+                                    return clickEl(btn);
                                 }}
                             }}
                         }}
                     }}
 
-                    // Strategy 2: Click the next page number directly
-                    const allElements = document.querySelectorAll('button, a, span, div, li, [role="button"]');
+                    // Strategy 3: Look for right arrow/chevron text symbols
+                    for (const el of allElements) {{
+                        const text = el.innerText?.trim();
+                        if (text === '›' || text === '»' || text === '→' || text === '>') {{
+                            const rect = el.getBoundingClientRect();
+                            if (rect.width > 0 && rect.height > 0 && rect.top > 300) {{
+                                return clickEl(el);
+                            }}
+                        }}
+                    }}
+
+                    // Strategy 4: Click next page number if visible (sliding window shows nearby pages)
                     for (const el of allElements) {{
                         const text = el.innerText?.trim();
                         if (text === String(nextPageNum)) {{
                             const rect = el.getBoundingClientRect();
-                            if (rect.width > 0 && rect.height > 0 && rect.top > 200) {{
-                                return clickElement(el);
+                            if (rect.width > 0 && rect.height > 0 && rect.top > 300) {{
+                                return clickEl(el);
                             }}
                         }}
                     }}
 
-                    // Strategy 3: Look for "Next" text buttons
+                    // Strategy 5: Find buttons/links with aria-label containing "next"
                     for (const el of allElements) {{
-                        const text = el.innerText?.trim().toLowerCase();
-                        if (text === 'next' || text === 'next →' || text === 'next→' || text.includes('next page')) {{
+                        const ariaLabel = (el.getAttribute('aria-label') || '').toLowerCase();
+                        if (ariaLabel.includes('next') && !ariaLabel.includes('prev')) {{
                             const rect = el.getBoundingClientRect();
-                            if (rect.width > 0 && rect.height > 0 && rect.top > 200) {{
-                                return clickElement(el);
+                            if (rect.width > 0 && rect.height > 0 && rect.top > 300) {{
+                                return clickEl(el);
                             }}
                         }}
                     }}
 
-                    // Strategy 4: Look for arrow symbols anywhere on page (in review area)
+                    // Strategy 6: Find any visible page number higher than current
                     for (const el of allElements) {{
                         const text = el.innerText?.trim();
-                        if (text === '›' || text === '»') {{
-                            const rect = el.getBoundingClientRect();
-                            if (rect.width > 0 && rect.height > 0 && rect.top > 200) {{
-                                return clickElement(el);
-                            }}
-                        }}
-                    }}
-
-                    // Strategy 5: Find active page and click the element immediately after it
-                    for (const el of allElements) {{
-                        const text = el.innerText?.trim();
-                        if (text === String(currentPageNum)) {{
-                            const parent = el.parentElement;
-                            if (parent) {{
-                                const siblings = Array.from(parent.children);
-                                const currentIndex = siblings.indexOf(el);
-                                if (currentIndex >= 0 && siblings[currentIndex + 1]) {{
-                                    const nextSibling = siblings[currentIndex + 1];
-                                    const nextText = nextSibling.innerText?.trim();
-                                    // Click if it's the next number or a navigation symbol
-                                    if (nextText === String(nextPageNum) || nextText === '›' || nextText === '>' || nextText === '...') {{
-                                        return clickElement(nextSibling);
-                                    }}
-                                }}
-                            }}
-                        }}
-                    }}
-
-                    // Strategy 6: Find any SVG-based arrow button that's likely "next"
-                    const svgButtons = document.querySelectorAll('button, a');
-                    for (const btn of svgButtons) {{
-                        const svg = btn.querySelector('svg');
-                        if (svg) {{
-                            const rect = btn.getBoundingClientRect();
-                            if (rect.width > 0 && rect.height > 0 && rect.top > 200) {{
-                                // Check if SVG path suggests right arrow
-                                const paths = svg.querySelectorAll('path');
-                                for (const path of paths) {{
-                                    const d = path.getAttribute('d') || '';
-                                    // Common right arrow path patterns
-                                    if (d.includes('l4') || d.includes('L4') || d.includes('l5') || d.includes('l6') ||
-                                        d.includes('l 4') || d.includes('l 5') || d.includes('l 6') ||
-                                        d.includes('9 5') || d.includes('9l-7') || d.includes('chevron')) {{
-                                        const ariaLabel = btn.getAttribute('aria-label') || '';
-                                        const className = btn.className || '';
-                                        // Make sure it's not a "previous" button
-                                        if (!ariaLabel.toLowerCase().includes('prev') &&
-                                            !ariaLabel.toLowerCase().includes('back') &&
-                                            !className.toLowerCase().includes('prev')) {{
-                                            return clickElement(btn);
-                                        }}
-                                    }}
+                        if (/^\\d+$/.test(text)) {{
+                            const pageNum = parseInt(text);
+                            if (pageNum === currentPageNum + 1 || pageNum === currentPageNum + 2) {{
+                                const rect = el.getBoundingClientRect();
+                                if (rect.width > 0 && rect.height > 0 && rect.top > 300) {{
+                                    return clickEl(el);
                                 }}
                             }}
                         }}
@@ -397,16 +402,11 @@ def scrape_reviews_with_progress(job_id, product_url, max_pages=50):
 
                 if not clicked:
                     retry_count += 1
-                    time.sleep(0.8)
-                    # Scroll pagination into better view
-                    driver.execute_script("""
-                        const pagination = document.querySelector('[class*="pagination"], [class*="Pagination"], [class*="pager"]');
-                        if (pagination) pagination.scrollIntoView({block: 'center'});
-                        else window.scrollBy(0, 200);
-                    """)
+                    time.sleep(0.5)
+                    driver.execute_script("window.scrollBy(0, 200);")
 
             if clicked:
-                time.sleep(2.0)  # Wait for new page to load (increased)
+                time.sleep(1.5)  # Wait for new page to load
                 current_page += 1
             else:
                 # Try scroll-based or stop
