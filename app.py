@@ -89,8 +89,13 @@ def scrape_reviews_with_progress(job_id, product_url, max_pages=50):
     try:
         job['status'] = 'loading'
         job['message'] = 'Loading product page...'
+        print(f"[{job_id}] Loading URL: {product_url}")
         driver.get(product_url)
-        time.sleep(3)  # Reduced from 5s
+        time.sleep(4)  # Wait for page to load
+
+        # Log page title to verify page loaded
+        page_title = driver.title
+        print(f"[{job_id}] Page loaded. Title: {page_title}")
 
         # Extract product title and image
         job['message'] = 'Extracting product info...'
@@ -128,9 +133,11 @@ def scrape_reviews_with_progress(job_id, product_url, max_pages=50):
 
         job['product_title'] = product_info.get('title', '')
         job['product_image'] = product_info.get('image', '')
+        print(f"[{job_id}] Product title: {job['product_title'][:50] if job['product_title'] else 'Not found'}")
 
         # Scroll to reviews
         job['message'] = 'Finding reviews section...'
+        print(f"[{job_id}] Scrolling to find reviews...")
         for i in range(5):
             driver.execute_script(f"window.scrollTo(0, document.body.scrollHeight * {0.3 + i*0.15});")
             time.sleep(0.4)  # Reduced from 0.8s
@@ -148,6 +155,7 @@ def scrape_reviews_with_progress(job_id, product_url, max_pages=50):
 
         job['status'] = 'scraping'
         current_page = 1
+        print(f"[{job_id}] Starting to scrape reviews...")
 
         while current_page <= max_pages:
             job['current_page'] = current_page
@@ -370,6 +378,9 @@ def scrape_reviews_with_progress(job_id, product_url, max_pages=50):
         job['progress'] = 100
 
     except Exception as e:
+        print(f"[{job_id}] ERROR: {str(e)}")
+        import traceback
+        traceback.print_exc()
         job['status'] = 'error'
         job['message'] = f'Error: {str(e)}'
     finally:
