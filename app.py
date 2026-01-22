@@ -187,17 +187,36 @@ def scrape_reviews_with_progress(job_id, product_url, max_pages=50):
                         // Extract item/variant info (Color, Size, etc.)
                         let itemVariant = '';
                         const lines = fullText.split('\\n');
-                        for (const line of lines) {
-                            const trimmed = line.trim();
-                            // Look for lines like "Color: Black" or "Size: M" or "Black-Carrying Handle"
-                            if (/^(Color|Size|Item|Variant|Style):/i.test(trimmed)) {
+                        for (let i = 0; i < lines.length; i++) {
+                            const trimmed = lines[i].trim();
+                            // Look for "Item:" label and get the next line as the variant
+                            if (trimmed === 'Item:' || trimmed === 'Item' || trimmed.toLowerCase() === 'item:') {
+                                // Get next non-empty line as the variant value
+                                for (let j = i + 1; j < lines.length && j < i + 3; j++) {
+                                    const nextLine = lines[j].trim();
+                                    if (nextLine && nextLine.length > 2 && nextLine.length < 80 &&
+                                        !nextLine.includes('Verified') && !/^\\d+$/.test(nextLine)) {
+                                        itemVariant = nextLine;
+                                        break;
+                                    }
+                                }
+                                if (itemVariant) break;
+                            }
+                            // Also handle "Item: Value" on same line
+                            if (/^Item:\\s*.+/i.test(trimmed)) {
+                                itemVariant = trimmed.replace(/^Item:\\s*/i, '');
+                                break;
+                            }
+                            // Look for lines like "Color: Black" or "Size: M"
+                            if (/^(Color|Size|Variant|Style):/i.test(trimmed)) {
                                 itemVariant = trimmed;
                                 break;
                             }
                             // Also catch variant patterns like "Black-Carrying Handle" or "Luxury Black-Built-in Handle"
-                            if (trimmed.length > 5 && trimmed.length < 60 &&
+                            if (!itemVariant && trimmed.length > 5 && trimmed.length < 60 &&
                                 /^[A-Z][a-z]+[-\\s][A-Z]/.test(trimmed) &&
-                                !trimmed.includes('Verified') && !trimmed.includes('US')) {
+                                !trimmed.includes('Verified') && !trimmed.includes('US') &&
+                                !trimmed.includes('Rating')) {
                                 itemVariant = trimmed;
                             }
                         }
