@@ -84,12 +84,50 @@ def scrape_reviews_with_progress(job_id, product_url, max_pages=50):
 
     reviews = []
     seen_reviews = set()
+    product_info = {'title': '', 'image': ''}
 
     try:
         job['status'] = 'loading'
         job['message'] = 'Loading product page...'
         driver.get(product_url)
         time.sleep(5)
+
+        # Extract product title and image
+        job['message'] = 'Extracting product info...'
+        product_info = driver.execute_script("""
+            let title = '';
+            let image = '';
+
+            // Try to get title
+            const titleEl = document.querySelector('h1') ||
+                           document.querySelector('[class*="title"]') ||
+                           document.querySelector('[class*="Title"]');
+            if (titleEl) title = titleEl.innerText.trim().split('\\n')[0];
+
+            // Try to get main product image
+            const imgEl = document.querySelector('[class*="ProductImage"] img') ||
+                         document.querySelector('[class*="product-image"] img') ||
+                         document.querySelector('[class*="gallery"] img') ||
+                         document.querySelector('[class*="slider"] img') ||
+                         document.querySelector('img[class*="product"]');
+            if (imgEl) image = imgEl.src || imgEl.getAttribute('data-src') || '';
+
+            // Fallback: get any large image on the page
+            if (!image) {
+                const imgs = document.querySelectorAll('img');
+                for (const img of imgs) {
+                    if (img.width > 200 && img.height > 200 && img.src) {
+                        image = img.src;
+                        break;
+                    }
+                }
+            }
+
+            return {title: title, image: image};
+        """) or {'title': '', 'image': ''}
+
+        job['product_title'] = product_info.get('title', '')
+        job['product_image'] = product_info.get('image', '')
 
         # Scroll to reviews
         job['message'] = 'Finding reviews section...'
@@ -146,13 +184,32 @@ def scrape_reviews_with_progress(job_id, product_url, max_pages=50):
                         const dateMatch = fullText.match(/(\\d{4}-\\d{2}-\\d{2})/);
                         const date = dateMatch ? dateMatch[1] : '';
 
+                        // Extract item/variant info (Color, Size, etc.)
+                        let itemVariant = '';
                         const lines = fullText.split('\\n');
+                        for (const line of lines) {
+                            const trimmed = line.trim();
+                            // Look for lines like "Color: Black" or "Size: M" or "Black-Carrying Handle"
+                            if (/^(Color|Size|Item|Variant|Style):/i.test(trimmed)) {
+                                itemVariant = trimmed;
+                                break;
+                            }
+                            // Also catch variant patterns like "Black-Carrying Handle" or "Luxury Black-Built-in Handle"
+                            if (trimmed.length > 5 && trimmed.length < 60 &&
+                                /^[A-Z][a-z]+[-\\s][A-Z]/.test(trimmed) &&
+                                !trimmed.includes('Verified') && !trimmed.includes('US')) {
+                                itemVariant = trimmed;
+                            }
+                        }
+
                         let reviewText = '';
                         for (const line of lines) {
                             const trimmed = line.trim();
                             if (trimmed.length < 15) continue;
                             if (/^(Verified|US|Item:|Color:|Size:|\\d{4}-|\\d+$|Rating:)/.test(trimmed)) continue;
                             if (/^[A-Za-z]\\*+[A-Za-z0-9]$/.test(trimmed)) continue;
+                            // Skip if it's the item variant we already captured
+                            if (trimmed === itemVariant) continue;
                             if (trimmed.length > reviewText.length) reviewText = trimmed;
                         }
 
@@ -161,7 +218,8 @@ def scrape_reviews_with_progress(job_id, product_url, max_pages=50):
                                 username: username,
                                 rating: rating,
                                 review_text: reviewText,
-                                date: date
+                                date: date,
+                                item_variant: itemVariant
                             });
                         }
                     } catch (e) {}
@@ -292,7 +350,9 @@ def get_status(job_id):
         'current_page': job.get('current_page', 0),
         'max_pages': job.get('max_pages', 0),
         'review_count': job.get('review_count', 0),
-        'reviews': job.get('reviews', []) if job['status'] == 'complete' else []
+        'reviews': job.get('reviews', []) if job['status'] == 'complete' else [],
+        'product_title': job.get('product_title', ''),
+        'product_image': job.get('product_image', '')
     })
 
 
@@ -317,6 +377,8 @@ def stream_status(job_id):
 
             if job['status'] in ('complete', 'error'):
                 data['reviews'] = job.get('reviews', [])
+                data['product_title'] = job.get('product_title', '')
+                data['product_image'] = job.get('product_image', '')
                 yield f"data: {json.dumps(data)}\n\n"
                 break
 
