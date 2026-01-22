@@ -269,114 +269,155 @@ def scrape_reviews_with_progress(job_id, product_url, max_pages=50):
             next_page_num = current_page + 1
 
             while not clicked and retry_count < max_retries:
-                # Debug: log ALL clickable elements near page numbers
+                # Debug: dump the pagination HTML structure
                 debug_info = driver.execute_script("""
-                    const found = [];
-                    const allElements = document.querySelectorAll('*');
-
-                    // First find pagination area by locating page numbers
-                    let paginationY = 0;
-                    for (const el of allElements) {
-                        const text = el.innerText?.trim();
-                        if (text === '1' || text === '2' || text === '3') {
-                            const rect = el.getBoundingClientRect();
-                            if (rect.width > 0 && rect.width < 60 && rect.height > 0 && rect.height < 60 && rect.top > 300) {
-                                paginationY = rect.top;
-                                break;
-                            }
+                    // Find pagination by looking for common pagination class patterns
+                    const paginationContainers = document.querySelectorAll('[class*="pagination"], [class*="Pagination"], [class*="pager"], [class*="Pager"], nav ul, ul[class*="page"]');
+                    let html = '';
+                    for (const container of paginationContainers) {
+                        const rect = container.getBoundingClientRect();
+                        if (rect.top > 300 && rect.height < 150) {
+                            html = container.outerHTML.substring(0, 2000);
+                            break;
                         }
                     }
 
-                    if (paginationY > 0) {
-                        // Log all elements at that Y level (within 30px)
-                        for (const el of allElements) {
-                            const rect = el.getBoundingClientRect();
-                            if (rect.width > 0 && rect.height > 0 && Math.abs(rect.top - paginationY) < 30) {
-                                const text = el.innerText?.trim();
-                                if (text && text.length < 20) {
-                                    found.push({text: text, tag: el.tagName, x: Math.round(rect.left)});
+                    // Also find by looking for li elements with page numbers
+                    if (!html) {
+                        const lis = document.querySelectorAll('li');
+                        for (const li of lis) {
+                            if (li.innerText?.trim() === '1' || li.innerText?.trim() === '2') {
+                                const rect = li.getBoundingClientRect();
+                                if (rect.top > 300 && rect.width < 100) {
+                                    const parent = li.parentElement?.parentElement || li.parentElement;
+                                    if (parent) {
+                                        html = parent.outerHTML.substring(0, 2000);
+                                        break;
+                                    }
                                 }
                             }
                         }
                     }
-
-                    // Sort by x position (left to right)
-                    found.sort((a, b) => a.x - b.x);
-                    return found;
+                    return html;
                 """)
-                print(f"[Page {current_page}] Pagination row elements (sorted left-to-right): {debug_info}")
+                print(f"[Page {current_page}] Pagination HTML: {debug_info[:1500] if debug_info else 'NOT FOUND'}")
 
                 clicked = driver.execute_script(f"""
                     const nextPageNum = {next_page_num};
                     const currentPageNum = {current_page};
 
                     function clickEl(el) {{
-                        el.scrollIntoView({{block: 'center'}});
-                        el.click();
-                        el.dispatchEvent(new MouseEvent('click', {{bubbles: true, cancelable: true, view: window}}));
-                        return true;
+                        try {{
+                            el.scrollIntoView({{block: 'center'}});
+                            el.focus();
+                            el.click();
+                            return true;
+                        }} catch(e) {{
+                            return false;
+                        }}
                     }}
 
-                    // Find pagination area by locating a known page number
-                    let paginationY = 0;
-                    let paginationElements = [];
-                    const allElements = document.querySelectorAll('*');
+                    // STRATEGY A: Find pagination ul/nav and click within it
+                    // TikTok likely uses a ul > li structure for pagination
+                    const lists = document.querySelectorAll('ul, nav');
+                    for (const list of lists) {{
+                        const rect = list.getBoundingClientRect();
+                        if (rect.top < 300 || rect.height > 150) continue;
 
-                    for (const el of allElements) {{
-                        const text = el.innerText?.trim();
-                        // Look for current page number or any single digit
-                        if (text === String(currentPageNum) || text === '1' || text === '2') {{
-                            const rect = el.getBoundingClientRect();
-                            if (rect.width > 0 && rect.width < 60 && rect.height > 0 && rect.height < 60 && rect.top > 300) {{
-                                paginationY = rect.top;
-                                break;
+                        const items = list.querySelectorAll('li, a, button, span, div');
+                        const pageItems = [];
+
+                        for (const item of items) {{
+                            const text = item.innerText?.trim();
+                            const itemRect = item.getBoundingClientRect();
+                            if (itemRect.width > 0 && itemRect.height > 0 && itemRect.width < 80) {{
+                                pageItems.push({{el: item, text: text, x: itemRect.left}});
                             }}
                         }}
-                    }}
 
-                    if (paginationY > 0) {{
-                        // Collect all clickable elements at pagination Y level
-                        const clickables = document.querySelectorAll('button, a, span, div, li, [role="button"]');
-                        for (const el of clickables) {{
-                            const rect = el.getBoundingClientRect();
-                            if (rect.width > 0 && rect.height > 0 && Math.abs(rect.top - paginationY) < 30) {{
-                                paginationElements.push({{el: el, x: rect.left, text: el.innerText?.trim()}});
+                        if (pageItems.length < 3) continue; // Not a pagination list
+
+                        // Sort left to right
+                        pageItems.sort((a, b) => a.x - b.x);
+
+                        // Try to click next page number
+                        for (const item of pageItems) {{
+                            if (item.text === String(nextPageNum)) {{
+                                console.log('Clicking page', nextPageNum);
+                                return clickEl(item.el);
                             }}
                         }}
-                        // Sort by x position (left to right)
-                        paginationElements.sort((a, b) => a.x - b.x);
-                    }}
 
-                    // Strategy 1: Click next page number if visible
-                    for (const item of paginationElements) {{
-                        if (item.text === String(nextPageNum)) {{
-                            return clickEl(item.el);
+                        // Try any higher page number
+                        for (const item of pageItems) {{
+                            if (/^\\d+$/.test(item.text)) {{
+                                const num = parseInt(item.text);
+                                if (num > currentPageNum && num <= currentPageNum + 5) {{
+                                    console.log('Clicking higher page', num);
+                                    return clickEl(item.el);
+                                }}
+                            }}
                         }}
-                    }}
 
-                    // Strategy 2: Click any higher page number
-                    for (const item of paginationElements) {{
-                        if (/^\\d+$/.test(item.text)) {{
-                            const pageNum = parseInt(item.text);
-                            if (pageNum > currentPageNum && pageNum <= currentPageNum + 10) {{
+                        // Click rightmost non-number element (should be next arrow)
+                        for (let i = pageItems.length - 1; i >= 0; i--) {{
+                            const item = pageItems[i];
+                            if (!/^\\d+$/.test(item.text) && item.text !== String(currentPageNum)) {{
+                                console.log('Clicking rightmost non-number:', item.text);
                                 return clickEl(item.el);
                             }}
                         }}
                     }}
 
-                    // Strategy 3: Click the RIGHTMOST element in pagination row
-                    // This should be the "Next" button or right arrow
-                    if (paginationElements.length > 0) {{
-                        const rightmost = paginationElements[paginationElements.length - 1];
-                        // Make sure it's not a page number we're already on
-                        if (rightmost.text !== String(currentPageNum)) {{
-                            return clickEl(rightmost.el);
+                    // STRATEGY B: Direct button/link search
+                    const allClickables = document.querySelectorAll('button, a, [role="button"]');
+                    for (const el of allClickables) {{
+                        const text = el.innerText?.trim();
+                        const rect = el.getBoundingClientRect();
+                        if (rect.top < 300 || rect.width === 0) continue;
+
+                        // Click exact next page number
+                        if (text === String(nextPageNum) && rect.width < 80) {{
+                            return clickEl(el);
                         }}
-                        // If rightmost is current page, try second-to-last
-                        if (paginationElements.length > 1) {{
-                            const secondLast = paginationElements[paginationElements.length - 2];
-                            if (secondLast.text !== String(currentPageNum)) {{
-                                return clickEl(secondLast.el);
+                    }}
+
+                    // STRATEGY C: Find by aria-label or title
+                    for (const el of allClickables) {{
+                        const aria = (el.getAttribute('aria-label') || '').toLowerCase();
+                        const title = (el.getAttribute('title') || '').toLowerCase();
+                        const rect = el.getBoundingClientRect();
+                        if (rect.top < 300 || rect.width === 0) continue;
+
+                        if (aria.includes('next') || aria.includes('page ' + nextPageNum) ||
+                            title.includes('next') || title.includes('page ' + nextPageNum)) {{
+                            return clickEl(el);
+                        }}
+                    }}
+
+                    // STRATEGY D: Find disabled/active page indicator and click its next sibling
+                    const activePages = document.querySelectorAll('[class*="active"], [class*="current"], [aria-current="page"]');
+                    for (const active of activePages) {{
+                        const rect = active.getBoundingClientRect();
+                        if (rect.top < 300) continue;
+
+                        // Try next sibling
+                        let next = active.nextElementSibling;
+                        if (next) {{
+                            const nextRect = next.getBoundingClientRect();
+                            if (nextRect.width > 0) {{
+                                console.log('Clicking sibling of active:', next.innerText);
+                                return clickEl(next);
+                            }}
+                        }}
+
+                        // Try parent's next sibling
+                        if (active.parentElement?.nextElementSibling) {{
+                            next = active.parentElement.nextElementSibling;
+                            const nextRect = next.getBoundingClientRect();
+                            if (nextRect.width > 0) {{
+                                console.log('Clicking parent sibling of active');
+                                return clickEl(next);
                             }}
                         }}
                     }}
