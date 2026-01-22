@@ -269,25 +269,42 @@ def scrape_reviews_with_progress(job_id, product_url, max_pages=50):
             next_page_num = current_page + 1
 
             while not clicked and retry_count < max_retries:
-                # Debug: log what pagination elements exist
+                # Debug: log ALL clickable elements near page numbers
                 debug_info = driver.execute_script("""
                     const found = [];
                     const allElements = document.querySelectorAll('*');
+
+                    // First find pagination area by locating page numbers
+                    let paginationY = 0;
                     for (const el of allElements) {
                         const text = el.innerText?.trim();
-                        const rect = el.getBoundingClientRect();
-                        if (rect.width > 0 && rect.height > 0 && rect.top > 300 && rect.height < 100) {
-                            if (/^\\d+$/.test(text) && parseInt(text) <= 200) {
-                                found.push({type: 'num', text: text, tag: el.tagName});
-                            }
-                            if (/next/i.test(text) || /next/i.test(el.getAttribute('aria-label') || '')) {
-                                found.push({type: 'next', text: text || el.getAttribute('aria-label'), tag: el.tagName});
+                        if (text === '1' || text === '2' || text === '3') {
+                            const rect = el.getBoundingClientRect();
+                            if (rect.width > 0 && rect.width < 60 && rect.height > 0 && rect.height < 60 && rect.top > 300) {
+                                paginationY = rect.top;
+                                break;
                             }
                         }
                     }
-                    return found.slice(0, 30);
+
+                    if (paginationY > 0) {
+                        // Log all elements at that Y level (within 30px)
+                        for (const el of allElements) {
+                            const rect = el.getBoundingClientRect();
+                            if (rect.width > 0 && rect.height > 0 && Math.abs(rect.top - paginationY) < 30) {
+                                const text = el.innerText?.trim();
+                                if (text && text.length < 20) {
+                                    found.push({text: text, tag: el.tagName, x: Math.round(rect.left)});
+                                }
+                            }
+                        }
+                    }
+
+                    // Sort by x position (left to right)
+                    found.sort((a, b) => a.x - b.x);
+                    return found;
                 """)
-                print(f"[Page {current_page}] Pagination elements: {debug_info}")
+                print(f"[Page {current_page}] Pagination row elements (sorted left-to-right): {debug_info}")
 
                 clicked = driver.execute_script(f"""
                     const nextPageNum = {next_page_num};
@@ -300,84 +317,66 @@ def scrape_reviews_with_progress(job_id, product_url, max_pages=50):
                         return true;
                     }}
 
-                    const allElements = document.querySelectorAll('button, a, span, div, li, [role="button"]');
+                    // Find pagination area by locating a known page number
+                    let paginationY = 0;
+                    let paginationElements = [];
+                    const allElements = document.querySelectorAll('*');
 
-                    // TikTok pagination behavior:
-                    // - Pages 1-5: Shows [1][2][3][4][5][Next]
-                    // - After page 5: Sliding window shows nearby numbers like [6][7][8][9][10]
-
-                    // Strategy 1: Click next page number if visible (works after page 5)
                     for (const el of allElements) {{
                         const text = el.innerText?.trim();
-                        if (text === String(nextPageNum)) {{
+                        // Look for current page number or any single digit
+                        if (text === String(currentPageNum) || text === '1' || text === '2') {{
                             const rect = el.getBoundingClientRect();
-                            if (rect.width > 0 && rect.height > 0 && rect.height < 100 && rect.top > 300) {{
-                                return clickEl(el);
+                            if (rect.width > 0 && rect.width < 60 && rect.height > 0 && rect.height < 60 && rect.top > 300) {{
+                                paginationY = rect.top;
+                                break;
                             }}
                         }}
                     }}
 
-                    // Strategy 2: Click any higher page number visible
-                    for (const el of allElements) {{
-                        const text = el.innerText?.trim();
-                        if (/^\\d+$/.test(text)) {{
-                            const pageNum = parseInt(text);
+                    if (paginationY > 0) {{
+                        // Collect all clickable elements at pagination Y level
+                        const clickables = document.querySelectorAll('button, a, span, div, li, [role="button"]');
+                        for (const el of clickables) {{
+                            const rect = el.getBoundingClientRect();
+                            if (rect.width > 0 && rect.height > 0 && Math.abs(rect.top - paginationY) < 30) {{
+                                paginationElements.push({{el: el, x: rect.left, text: el.innerText?.trim()}});
+                            }}
+                        }}
+                        // Sort by x position (left to right)
+                        paginationElements.sort((a, b) => a.x - b.x);
+                    }}
+
+                    // Strategy 1: Click next page number if visible
+                    for (const item of paginationElements) {{
+                        if (item.text === String(nextPageNum)) {{
+                            return clickEl(item.el);
+                        }}
+                    }}
+
+                    // Strategy 2: Click any higher page number
+                    for (const item of paginationElements) {{
+                        if (/^\\d+$/.test(item.text)) {{
+                            const pageNum = parseInt(item.text);
                             if (pageNum > currentPageNum && pageNum <= currentPageNum + 10) {{
-                                const rect = el.getBoundingClientRect();
-                                if (rect.width > 0 && rect.height > 0 && rect.height < 100 && rect.top > 300) {{
-                                    return clickEl(el);
-                                }}
+                                return clickEl(item.el);
                             }}
                         }}
                     }}
 
-                    // Strategy 3: Click "Next" button (critical for pages 1-5 where not all numbers show)
-                    // Look for elements with "Next" text or aria-label
-                    for (const el of allElements) {{
-                        const text = (el.innerText?.trim() || '').toLowerCase();
-                        const ariaLabel = (el.getAttribute('aria-label') || '').toLowerCase();
-
-                        if (text === 'next' || text === 'next page' ||
-                            ariaLabel === 'next' || ariaLabel === 'next page' ||
-                            ariaLabel.includes('go to next')) {{
-                            const rect = el.getBoundingClientRect();
-                            if (rect.width > 0 && rect.height > 0 && rect.height < 100 && rect.top > 300) {{
-                                return clickEl(el);
-                            }}
+                    // Strategy 3: Click the RIGHTMOST element in pagination row
+                    // This should be the "Next" button or right arrow
+                    if (paginationElements.length > 0) {{
+                        const rightmost = paginationElements[paginationElements.length - 1];
+                        // Make sure it's not a page number we're already on
+                        if (rightmost.text !== String(currentPageNum)) {{
+                            return clickEl(rightmost.el);
                         }}
-                    }}
-
-                    // Strategy 4: Look for button/link immediately AFTER the highest visible page number
-                    // This catches arrow buttons that don't have text
-                    let highestPageEl = null;
-                    let highestPage = 0;
-                    for (const el of allElements) {{
-                        const text = el.innerText?.trim();
-                        if (/^\\d+$/.test(text)) {{
-                            const num = parseInt(text);
-                            const rect = el.getBoundingClientRect();
-                            if (num > highestPage && rect.width > 0 && rect.height > 0 && rect.height < 100 && rect.top > 300) {{
-                                highestPage = num;
-                                highestPageEl = el;
-                            }}
-                        }}
-                    }}
-
-                    if (highestPageEl) {{
-                        // Find the next sibling or nearby element that could be "next" button
-                        let nextEl = highestPageEl.nextElementSibling;
-                        if (nextEl) {{
-                            const rect = nextEl.getBoundingClientRect();
-                            if (rect.width > 0 && rect.height > 0) {{
-                                return clickEl(nextEl);
-                            }}
-                        }}
-                        // Try parent's next sibling
-                        const parent = highestPageEl.parentElement;
-                        if (parent && parent.nextElementSibling) {{
-                            const rect = parent.nextElementSibling.getBoundingClientRect();
-                            if (rect.width > 0 && rect.height > 0) {{
-                                return clickEl(parent.nextElementSibling);
+                        // If rightmost is current page, try second-to-last
+                        if (paginationElements.length > 1) {{
+                            const secondLast = paginationElements[paginationElements.length - 2];
+                            if (secondLast.text !== String(currentPageNum)) {{
+                                return clickEl(secondLast.el);
                             }}
                         }}
                     }}
