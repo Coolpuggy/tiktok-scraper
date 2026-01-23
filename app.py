@@ -58,32 +58,29 @@ def scrape_reviews_with_progress(job_id, product_url, max_pages=50):
     chrome_options.add_argument("--window-size=1920,1080")
     chrome_options.add_argument("--disable-blink-features=AutomationControlled")
     chrome_options.add_argument("--disable-software-rasterizer")
-    chrome_options.add_argument("--remote-debugging-port=9222")
     chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
     chrome_options.add_experimental_option('useAutomationExtension', False)
     chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
     chrome_options.add_argument("--ignore-certificate-errors")
-    chrome_options.add_argument("--ignore-ssl-errors=yes")
 
     # Configure residential proxy if available (Bright Data format)
     # BRIGHT_DATA_PROXY format: username:password@host:port
     proxy_url = os.environ.get('BRIGHT_DATA_PROXY')
-    proxy_user = None
-    proxy_pass = None
+    use_wire = False
+    seleniumwire_options = None
     if proxy_url:
-        # Parse credentials and host
-        if '@' in proxy_url:
-            creds_part, host_part = proxy_url.rsplit('@', 1)
-            # creds_part is username:password
-            if ':' in creds_part:
-                proxy_user = creds_part.rsplit(':', 1)[0]
-                proxy_pass = creds_part.rsplit(':', 1)[1]
-        else:
-            host_part = proxy_url
-
-        # Set Chrome's proxy-server to the host:port (auth handled via CDP)
-        chrome_options.add_argument(f"--proxy-server=http://{host_part}")
-        print(f"[{job_id}] Using residential proxy: {host_part}")
+        seleniumwire_options = {
+            'proxy': {
+                'http': f'http://{proxy_url}',
+                'https': f'http://{proxy_url}',
+                'no_proxy': 'localhost,127.0.0.1'
+            },
+            'suppress_connection_errors': False,
+            'verify_ssl': False,
+        }
+        use_wire = True
+        host_part = proxy_url.split('@')[-1] if '@' in proxy_url else proxy_url
+        print(f"[{job_id}] Using residential proxy via selenium-wire: {host_part}")
     else:
         print(f"[{job_id}] No proxy configured (set BRIGHT_DATA_PROXY env var)")
 
@@ -93,21 +90,26 @@ def scrape_reviews_with_progress(job_id, product_url, max_pages=50):
         chrome_options.binary_location = chrome_bin
 
     try:
-        try:
-            driver = webdriver.Chrome(options=chrome_options)
-        except Exception:
-            service = Service(ChromeDriverManager().install())
-            driver = webdriver.Chrome(service=service, options=chrome_options)
-
-        # Handle proxy authentication via CDP
-        if proxy_user and proxy_pass:
-            import base64
-            credentials = base64.b64encode(f'{proxy_user}:{proxy_pass}'.encode()).decode()
-            driver.execute_cdp_cmd('Network.enable', {})
-            driver.execute_cdp_cmd('Network.setExtraHTTPHeaders', {
-                'headers': {'Proxy-Authorization': f'Basic {credentials}'}
-            })
-            print(f"[{job_id}] Proxy auth configured via CDP")
+        if use_wire:
+            from seleniumwire import webdriver as wire_webdriver
+            try:
+                driver = wire_webdriver.Chrome(
+                    options=chrome_options,
+                    seleniumwire_options=seleniumwire_options
+                )
+            except Exception:
+                service = Service(ChromeDriverManager().install())
+                driver = wire_webdriver.Chrome(
+                    service=service,
+                    options=chrome_options,
+                    seleniumwire_options=seleniumwire_options
+                )
+        else:
+            try:
+                driver = webdriver.Chrome(options=chrome_options)
+            except Exception:
+                service = Service(ChromeDriverManager().install())
+                driver = webdriver.Chrome(service=service, options=chrome_options)
 
         driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
     except Exception as e:
