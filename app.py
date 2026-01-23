@@ -246,6 +246,51 @@ def scrape_reviews_with_progress(job_id, product_url, max_pages=50):
             job['product_image'] = product_info.get('image', '')
             print(f"[{job_id}] Product: {job['product_title'][:50]}")
 
+            # Collect DOM debug info on first page
+            try:
+                dom_debug = page.evaluate("""() => {
+                    const info = {};
+                    const ratings = document.querySelectorAll('[aria-label*="Rating"]');
+                    info.total_rating_elements = ratings.length;
+
+                    const ratings_5star = document.querySelectorAll('[aria-label*="Rating:"][aria-label*="out of 5 stars"]');
+                    info.rating_5star_elements = ratings_5star.length;
+
+                    // Sample first 2 rating elements' parent text
+                    info.samples = [];
+                    ratings_5star.forEach((el, i) => {
+                        if (i >= 2) return;
+                        let container = el;
+                        for (let j = 0; j < 10; j++) {
+                            container = container.parentElement;
+                            if (!container) break;
+                            if (container.innerText && container.innerText.length > 50) break;
+                        }
+                        if (container) {
+                            info.samples.push(container.innerText.substring(0, 300));
+                        }
+                    });
+
+                    // Check pagination
+                    info.pagination = [];
+                    const allEls = document.querySelectorAll('button, a, [role="button"]');
+                    allEls.forEach(el => {
+                        const text = el.innerText?.trim();
+                        if (text === 'Next' || text === '>' || text === '›' || /^\\d+$/.test(text)) {
+                            const rect = el.getBoundingClientRect();
+                            if (rect.width > 0 && rect.top > 200) {
+                                info.pagination.push({text, tag: el.tagName, top: Math.round(rect.top)});
+                            }
+                        }
+                    });
+
+                    return info;
+                }""")
+                print(f"[{job_id}] DOM Debug: {json.dumps(dom_debug, indent=2)}")
+                job['_dom_debug'] = dom_debug
+            except Exception as debug_err:
+                print(f"[{job_id}] DOM debug error: {debug_err}")
+
             current_page = 1
 
             while current_page <= max_pages:
@@ -612,92 +657,12 @@ def stream_status(job_id):
 
 @app.route('/debug-dom/<job_id>')
 def debug_dom(job_id):
-    """Debug: dump DOM structure of reviews section from an active job."""
+    """Return stored DOM debug info from the scraping loop."""
     if job_id not in scrape_jobs:
         return jsonify({'error': 'Job not found'}), 404
 
     job = scrape_jobs[job_id]
-    page = job.get('_page')
-    if not page or job.get('_browser_closed'):
-        return jsonify({'error': 'No active browser'}), 400
-
-    try:
-        dom_info = page.evaluate("""() => {
-            const info = {
-                title: document.title,
-                url: window.location.href,
-                rating_elements: 0,
-                review_containers: [],
-                pagination_html: '',
-                all_aria_labels: [],
-            };
-
-            // Find rating elements
-            const ratings = document.querySelectorAll('[aria-label*="Rating"]');
-            info.rating_elements = ratings.length;
-
-            // Get first 3 review container HTML samples
-            ratings.forEach((el, i) => {
-                if (i >= 3) return;
-                let container = el;
-                for (let j = 0; j < 10; j++) {
-                    container = container.parentElement;
-                    if (!container) break;
-                    if (container.innerText && container.innerText.length > 50) break;
-                }
-                if (container) {
-                    info.review_containers.push({
-                        index: i,
-                        outerHTML: container.outerHTML.substring(0, 2000),
-                        innerText: container.innerText.substring(0, 500),
-                    });
-                }
-            });
-
-            // Find pagination
-            const paginations = document.querySelectorAll('[class*="pagination"], [class*="Pagination"], [class*="pager"], nav');
-            paginations.forEach((p, i) => {
-                if (i < 2) {
-                    info.pagination_html += p.outerHTML.substring(0, 1500) + '\\n---\\n';
-                }
-            });
-
-            // Also check for numbered page buttons
-            const pageButtons = document.querySelectorAll('button, [role="button"]');
-            const pageNums = [];
-            pageButtons.forEach(btn => {
-                const text = btn.innerText?.trim();
-                if (/^\\d+$/.test(text) && parseInt(text) > 0 && parseInt(text) < 200) {
-                    pageNums.push({text, classes: btn.className, ariaLabel: btn.getAttribute('aria-label')});
-                }
-            });
-            info.page_number_buttons = pageNums.slice(0, 20);
-
-            // Check for any "next" or arrow elements
-            const allEls = document.querySelectorAll('*');
-            const nextEls = [];
-            allEls.forEach(el => {
-                const aria = el.getAttribute('aria-label') || '';
-                const text = el.innerText?.trim() || '';
-                if ((aria.toLowerCase().includes('next') || text === '>' || text === '›' || text === '»' || text === 'Next')
-                    && el.getBoundingClientRect().width > 0) {
-                    nextEls.push({
-                        tag: el.tagName,
-                        text: text.substring(0, 50),
-                        aria: aria,
-                        classes: el.className?.substring?.(0, 100) || '',
-                        rect: el.getBoundingClientRect(),
-                    });
-                }
-            });
-            info.next_elements = nextEls.slice(0, 10);
-
-            return info;
-        }""")
-
-        return jsonify(dom_info)
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
+    return jsonify(job.get('_dom_debug', {'message': 'No debug info yet - job may still be loading'}))
 
 
 @app.route('/health')
