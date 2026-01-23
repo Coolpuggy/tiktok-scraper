@@ -468,26 +468,24 @@ def scrape_reviews_with_progress(job_id, product_url, max_pages=50):
                 if current_page >= max_pages:
                     break
 
-                # Save the full page HTML on the first page for debugging
-                if current_page == 1:
-                    try:
-                        full_html = page.evaluate("() => document.documentElement.outerHTML")
-                        job['_page_html'] = full_html
-                        # Also save to file so it persists
-                        with open('/tmp/last_page.html', 'w', encoding='utf-8') as f:
-                            f.write(full_html)
-                        print(f"[{job_id}] Saved full page HTML ({len(full_html)} chars) to /tmp/last_page.html")
-                    except Exception as html_err:
-                        print(f"[{job_id}] Failed to save page HTML: {html_err}")
+                # Save the full page HTML for debugging (always, not just page 1)
+                try:
+                    full_html = page.evaluate("() => document.documentElement.outerHTML")
+                    job['_page_html'] = full_html
+                    with open('/tmp/last_page.html', 'w', encoding='utf-8') as f:
+                        f.write(full_html)
+                    if current_page == 1:
+                        print(f"[{job_id}] Saved page HTML ({len(full_html)} chars)")
+                except Exception as html_err:
+                    print(f"[{job_id}] Failed to save page HTML: {html_err}")
 
                 # Scroll down to ensure pagination is in view
                 page.evaluate("""() => {
-                    // Find the last rating element and scroll past it
                     const ratings = document.querySelectorAll('[aria-label*="Rating:"][aria-label*="out of 5 stars"]');
                     if (ratings.length > 0) {
                         const last = ratings[ratings.length - 1];
                         last.scrollIntoView({block: 'start'});
-                        window.scrollBy(0, 300);
+                        window.scrollBy(0, 400);
                     } else {
                         window.scrollBy(0, 600);
                     }
@@ -496,102 +494,112 @@ def scrape_reviews_with_progress(job_id, product_url, max_pages=50):
 
                 next_page = current_page + 1
 
-                # Use page.locator to find and click the Next button with Playwright's
-                # built-in waiting and actionability checks
-                clicked = False
-                click_method = ''
+                # Pure JS pagination - no Playwright locators (they hang with timeouts)
+                click_result = page.evaluate(f"""() => {{
+                    // Collect all clickable elements
+                    const allEls = document.querySelectorAll('button, a, [role="button"], span[class], div[class]');
+                    const results = [];
 
-                try:
-                    # Try clicking a button/link containing "Next" text
-                    next_btn = page.locator('button:has-text("Next"), a:has-text("Next")').first
-                    if next_btn.count() > 0 and next_btn.is_visible():
-                        next_btn.scroll_into_view_if_needed()
-                        next_btn.click()
-                        clicked = True
-                        click_method = 'locator_next_text'
-                except Exception as e:
-                    print(f"[{job_id}] Locator 'Next' failed: {e}")
+                    // FIRST: Find the pagination container by looking for a group of
+                    // elements with page numbers near each other
+                    let paginationEls = [];
+                    for (const el of allEls) {{
+                        const text = (el.innerText || '').trim();
+                        const rect = el.getBoundingClientRect();
+                        if (!rect.width || !rect.height) continue;
+                        // Look for elements with just a number
+                        if (/^\\d+$/.test(text) && parseInt(text) > 0 && parseInt(text) < 1000 && rect.width < 80) {{
+                            paginationEls.push({{el, rect, num: parseInt(text)}});
+                        }}
+                    }}
 
-                if not clicked:
-                    try:
-                        # Try clicking the page number directly
-                        page_btn = page.locator(f'button:has-text("{next_page}"), a:has-text("{next_page}")').first
-                        if page_btn.count() > 0 and page_btn.is_visible():
-                            page_btn.scroll_into_view_if_needed()
-                            page_btn.click()
-                            clicked = True
-                            click_method = f'locator_page_{next_page}'
-                    except Exception as e:
-                        print(f"[{job_id}] Locator page number failed: {e}")
+                    // If we found page numbers, find the "Next" button near them
+                    if (paginationEls.length >= 2) {{
+                        // The pagination area is around the same Y position as the page numbers
+                        const avgTop = paginationEls.reduce((s, p) => s + p.rect.top, 0) / paginationEls.length;
 
-                if not clicked:
-                    try:
-                        # Try aria-label approach
-                        next_aria = page.locator('[aria-label*="next" i], [aria-label*="Next"]').first
-                        if next_aria.count() > 0 and next_aria.is_visible():
-                            next_aria.scroll_into_view_if_needed()
-                            next_aria.click()
-                            clicked = True
-                            click_method = 'locator_aria_next'
-                    except Exception as e:
-                        print(f"[{job_id}] Locator aria next failed: {e}")
+                        // Find all clickable elements at the same Y level (within 40px)
+                        const nearbyEls = [];
+                        for (const el of allEls) {{
+                            const rect = el.getBoundingClientRect();
+                            if (!rect.width || !rect.height) continue;
+                            if (Math.abs(rect.top - avgTop) < 40) {{
+                                nearbyEls.push({{el, rect, text: (el.innerText || '').trim()}});
+                            }}
+                        }}
 
-                if not clicked:
-                    # Fallback: use evaluate to find and click
-                    click_result = page.evaluate(f"""(targetPage) => {{
-                        const allClickable = document.querySelectorAll('button, a, [role="button"]');
-
-                        // Find anything with "next" in text
-                        for (const el of allClickable) {{
-                            const text = (el.innerText || el.textContent || '').toLowerCase().trim();
-                            if (text.includes('next')) {{
-                                const rect = el.getBoundingClientRect();
-                                if (rect.width > 0 && rect.height > 0) {{
-                                    el.scrollIntoView({{block: 'center'}});
-                                    el.click();
-                                    return 'js_next: ' + text.substring(0, 30);
+                        // Among nearby elements, find one with "Next" or "next" or arrow
+                        for (const item of nearbyEls) {{
+                            if (/next/i.test(item.text)) {{
+                                const isDisabled = item.el.disabled ||
+                                    item.el.getAttribute('aria-disabled') === 'true' ||
+                                    item.el.classList.contains('disabled');
+                                if (!isDisabled) {{
+                                    item.el.scrollIntoView({{block: 'center'}});
+                                    item.el.click();
+                                    return 'pagination_next: ' + item.text.substring(0, 30);
+                                }} else {{
+                                    return 'pagination_next_DISABLED';
                                 }}
                             }}
                         }}
 
-                        // Find page number
-                        for (const el of allClickable) {{
-                            const text = (el.innerText || '').trim();
-                            if (text === String(targetPage)) {{
-                                const rect = el.getBoundingClientRect();
-                                if (rect.width > 0 && rect.width < 100 && rect.height > 0) {{
-                                    el.scrollIntoView({{block: 'center'}});
-                                    el.click();
-                                    return 'js_page_number';
-                                }}
+                        // Try arrow characters near page numbers
+                        for (const item of nearbyEls) {{
+                            if (item.text === '>' || item.text === '›' || item.text === '→' || item.text === '»') {{
+                                item.el.scrollIntoView({{block: 'center'}});
+                                item.el.click();
+                                return 'pagination_arrow: ' + item.text;
                             }}
                         }}
 
-                        // Find arrow characters
-                        for (const el of allClickable) {{
-                            const text = (el.innerText || '').trim();
-                            if (text === '>' || text === '›' || text === '»' || text === '→') {{
-                                const rect = el.getBoundingClientRect();
-                                if (rect.width > 0 && rect.height > 0) {{
-                                    el.scrollIntoView({{block: 'center'}});
-                                    el.click();
-                                    return 'js_arrow: ' + text;
-                                }}
+                        // Try clicking the target page number directly
+                        for (const p of paginationEls) {{
+                            if (p.num === {next_page}) {{
+                                p.el.scrollIntoView({{block: 'center'}});
+                                p.el.click();
+                                return 'pagination_page_number: ' + {next_page};
                             }}
                         }}
 
-                        return null;
-                    }}""", next_page)
+                        // Last resort: click the rightmost non-number element near pagination
+                        // (likely the "next" arrow even if it has no text - could be SVG)
+                        const maxNumLeft = Math.max(...paginationEls.map(p => p.rect.right));
+                        for (const item of nearbyEls) {{
+                            if (item.rect.left >= maxNumLeft - 5 && !/^\\d+$/.test(item.text)) {{
+                                const isDisabled = item.el.disabled ||
+                                    item.el.getAttribute('aria-disabled') === 'true';
+                                if (!isDisabled) {{
+                                    item.el.scrollIntoView({{block: 'center'}});
+                                    item.el.click();
+                                    return 'pagination_right_of_numbers: ' + (item.text || '[no text/svg]').substring(0, 20);
+                                }}
+                            }}
+                        }}
+                    }}
 
-                    if click_result:
-                        clicked = True
-                        click_method = click_result
+                    // FALLBACK: Global search for "Next" button/link anywhere on page
+                    for (const el of allEls) {{
+                        const text = (el.innerText || '').trim();
+                        const rect = el.getBoundingClientRect();
+                        if (!rect.width || !rect.height) continue;
+                        if (/^next$/i.test(text) || /^next\\s*[→›»>]$/i.test(text)) {{
+                            const isDisabled = el.disabled || el.getAttribute('aria-disabled') === 'true';
+                            if (!isDisabled) {{
+                                el.scrollIntoView({{block: 'center'}});
+                                el.click();
+                                return 'global_next: ' + text.substring(0, 20);
+                            }}
+                        }}
+                    }}
 
-                if clicked:
-                    print(f"[{job_id}] Pagination click: {click_method} -> page {next_page}")
+                    return null;
+                }}""")
+
+                if click_result:
+                    print(f"[{job_id}] Pagination: {click_result} -> page {next_page}")
                     # Wait for new reviews to load
                     page.wait_for_timeout(2000)
-                    # Verify page actually changed by checking if new reviews appeared
                     for wait_attempt in range(6):
                         rating_count = page.evaluate("""() => {
                             return document.querySelectorAll('[aria-label*="Rating:"][aria-label*="out of 5 stars"]').length;
@@ -604,12 +612,6 @@ def scrape_reviews_with_progress(job_id, product_url, max_pages=50):
                     current_page += 1
                 else:
                     print(f"[{job_id}] No pagination found after page {current_page}")
-                    # Save HTML for debugging on failure too
-                    try:
-                        full_html = page.evaluate("() => document.documentElement.outerHTML")
-                        job['_page_html'] = full_html
-                    except Exception:
-                        pass
                     job['message'] = 'No more pages found'
                     break
 
