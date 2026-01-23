@@ -473,7 +473,10 @@ def scrape_reviews_with_progress(job_id, product_url, max_pages=50):
                     try:
                         full_html = page.evaluate("() => document.documentElement.outerHTML")
                         job['_page_html'] = full_html
-                        print(f"[{job_id}] Saved full page HTML ({len(full_html)} chars)")
+                        # Also save to file so it persists
+                        with open('/tmp/last_page.html', 'w', encoding='utf-8') as f:
+                            f.write(full_html)
+                        print(f"[{job_id}] Saved full page HTML ({len(full_html)} chars) to /tmp/last_page.html")
                     except Exception as html_err:
                         print(f"[{job_id}] Failed to save page HTML: {html_err}")
 
@@ -789,15 +792,33 @@ def debug_dom(job_id):
 @app.route('/debug-html/<job_id>')
 def debug_html(job_id):
     """Return the saved page HTML for debugging pagination."""
-    if job_id not in scrape_jobs:
-        return Response('Job not found', status=404)
+    html = ''
+    if job_id in scrape_jobs:
+        html = scrape_jobs[job_id].get('_page_html', '')
 
-    job = scrape_jobs[job_id]
-    html = job.get('_page_html', '')
+    # Fallback: read from file
     if not html:
-        return Response('No HTML saved yet - job may still be loading', status=404)
+        try:
+            with open('/tmp/last_page.html', 'r', encoding='utf-8') as f:
+                html = f.read()
+        except Exception:
+            pass
+
+    if not html:
+        return Response('No HTML saved yet', status=404)
 
     return Response(html, mimetype='text/html')
+
+
+@app.route('/debug-html-raw')
+def debug_html_raw():
+    """Return the last saved page HTML (no job_id needed)."""
+    try:
+        with open('/tmp/last_page.html', 'r', encoding='utf-8') as f:
+            html = f.read()
+        return Response(html, mimetype='text/html')
+    except Exception:
+        return Response('No HTML saved yet', status=404)
 
 
 @app.route('/health')
