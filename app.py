@@ -10,6 +10,7 @@ import json
 import time
 import re
 import threading
+import queue
 import os
 import base64
 from urllib.parse import urlparse
@@ -98,41 +99,69 @@ def scrape_reviews_with_progress(job_id, product_url, max_pages=50):
             job['message'] = 'Loading page - please solve CAPTCHA if shown...'
             print(f"[{job_id}] Navigating to: {product_url}")
 
-            # Start screenshot streaming in background (starts even during page load)
-            def update_screenshots():
-                while job.get('status') in ('captcha', 'starting', 'loading'):
-                    try:
-                        if job.get('_page') and not job.get('_browser_closed'):
-                            ss = page.screenshot(type='jpeg', quality=50)
-                            job['_screenshot'] = base64.b64encode(ss).decode('utf-8')
-                            job['_screenshot_updated'] = time.time()
-                    except Exception as ss_err:
-                        print(f"[{job_id}] Screenshot error: {ss_err}")
-                        time.sleep(1)
-                        continue
-                    time.sleep(0.3)
-
-            ss_thread = threading.Thread(target=update_screenshots, daemon=True)
-            ss_thread.start()
-
             try:
                 page.goto(product_url, timeout=60000, wait_until='domcontentloaded')
             except Exception as nav_err:
-                print(f"[{job_id}] Navigation error (may be proxy issue): {nav_err}")
-                # Even if goto times out, the page might have partially loaded
-                # Continue and let the user interact
+                print(f"[{job_id}] Navigation error: {nav_err}")
+                # Even if goto times out, page might have partially loaded
 
             page.wait_for_timeout(2000)
+
+            # Take initial screenshot
+            try:
+                ss = page.screenshot(type='jpeg', quality=50)
+                job['_screenshot'] = base64.b64encode(ss).decode('utf-8')
+                job['_screenshot_updated'] = time.time()
+                print(f"[{job_id}] Initial screenshot taken ({len(ss)} bytes)")
+            except Exception as ss_err:
+                print(f"[{job_id}] Screenshot error: {ss_err}")
 
             # Wait for CAPTCHA to be solved (check for review elements or page content)
             # We give the user up to 3 minutes to solve it
             captcha_timeout = 180  # seconds
             start_wait = time.time()
             captcha_solved = False
+            screenshot_interval = 0.4  # seconds between screenshots
 
             while time.time() - start_wait < captcha_timeout:
                 if job.get('status') == 'error':
                     break
+
+                # Process any pending mouse/keyboard events from frontend
+                event_queue = job.get('_event_queue')
+                if event_queue:
+                    while not event_queue.empty():
+                        try:
+                            evt = event_queue.get_nowait()
+                            evt_type = evt.get('type')
+                            x = evt.get('x', 0)
+                            y = evt.get('y', 0)
+                            if evt_type == 'click':
+                                page.mouse.click(x, y)
+                            elif evt_type == 'mousedown':
+                                page.mouse.move(x, y)
+                                page.mouse.down()
+                            elif evt_type == 'mouseup':
+                                page.mouse.move(x, y)
+                                page.mouse.up()
+                            elif evt_type == 'mousemove':
+                                page.mouse.move(x, y)
+                            elif evt_type == 'scroll':
+                                page.mouse.wheel(evt.get('deltaX', 0), evt.get('deltaY', 0))
+                            elif evt_type == 'keydown':
+                                key = evt.get('key', '')
+                                if key:
+                                    page.keyboard.press(key)
+                        except Exception as evt_err:
+                            print(f"[{job_id}] Event error: {evt_err}")
+
+                # Take screenshot for streaming to frontend
+                try:
+                    ss = page.screenshot(type='jpeg', quality=50)
+                    job['_screenshot'] = base64.b64encode(ss).decode('utf-8')
+                    job['_screenshot_updated'] = time.time()
+                except Exception:
+                    pass
 
                 # Check if page has reviews or product content (CAPTCHA solved)
                 try:
@@ -160,7 +189,7 @@ def scrape_reviews_with_progress(job_id, product_url, max_pages=50):
                 except Exception:
                     pass
 
-                time.sleep(1)
+                time.sleep(screenshot_interval)
 
             if not captcha_solved:
                 job['status'] = 'error'
@@ -462,6 +491,7 @@ def start_scrape():
         'reviews': [],
         'review_count': 0,
         '_browser_closed': False,
+        '_event_queue': queue.Queue(),
     }
 
     # Start scraping in background thread
@@ -531,52 +561,22 @@ def browser_stream(job_id):
 
 @app.route('/browser-event/<job_id>', methods=['POST'])
 def browser_event(job_id):
-    """Receive mouse/keyboard events from frontend and forward to browser."""
+    """Receive mouse/keyboard events from frontend and queue them for the browser."""
     if job_id not in scrape_jobs:
         return jsonify({'error': 'Job not found'}), 404
 
     job = scrape_jobs[job_id]
-    page = job.get('_page')
 
-    if not page or job.get('_browser_closed'):
-        return jsonify({'error': 'Browser not available'}), 400
+    if job.get('_browser_closed') or job.get('status') not in ('captcha', 'starting', 'loading'):
+        return jsonify({'error': 'Browser not in interactive state'}), 400
+
+    event_queue = job.get('_event_queue')
+    if not event_queue:
+        return jsonify({'error': 'Event queue not available'}), 400
 
     data = request.json
-    event_type = data.get('type')
-
-    try:
-        if event_type == 'click':
-            x = data.get('x', 0)
-            y = data.get('y', 0)
-            page.mouse.click(x, y)
-        elif event_type == 'mousemove':
-            x = data.get('x', 0)
-            y = data.get('y', 0)
-            page.mouse.move(x, y)
-        elif event_type == 'mousedown':
-            x = data.get('x', 0)
-            y = data.get('y', 0)
-            page.mouse.move(x, y)
-            page.mouse.down()
-        elif event_type == 'mouseup':
-            x = data.get('x', 0)
-            y = data.get('y', 0)
-            page.mouse.move(x, y)
-            page.mouse.up()
-        elif event_type == 'scroll':
-            x = data.get('x', 0)
-            y = data.get('y', 0)
-            delta_x = data.get('deltaX', 0)
-            delta_y = data.get('deltaY', 0)
-            page.mouse.wheel(delta_x, delta_y)
-        elif event_type == 'keydown':
-            key = data.get('key', '')
-            if key:
-                page.keyboard.press(key)
-
-        return jsonify({'ok': True})
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
+    event_queue.put(data)
+    return jsonify({'ok': True})
 
 
 @app.route('/stream/<job_id>')
