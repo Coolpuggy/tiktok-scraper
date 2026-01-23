@@ -645,6 +645,50 @@ def stream_status(job_id):
     return Response(generate(), mimetype='text/event-stream')
 
 
+@app.route('/test-proxy')
+def test_proxy():
+    """Test proxy connectivity."""
+    import requests as req
+    proxy_url = os.environ.get('BRIGHT_DATA_PROXY')
+    if not proxy_url:
+        return jsonify({'error': 'No proxy configured'})
+
+    # Adjust port
+    proxy_url_adjusted = proxy_url.replace(':33335', ':22225')
+    proxies = {
+        'http': f'http://{proxy_url_adjusted}',
+        'https': f'http://{proxy_url_adjusted}',
+    }
+    results = {}
+
+    # Test 1: httpbin
+    try:
+        resp = req.get('http://httpbin.org/ip', proxies=proxies, timeout=15)
+        results['httpbin'] = resp.json()
+    except Exception as e:
+        results['httpbin'] = f'Error: {str(e)}'
+
+    # Test 2: TikTok Shop
+    try:
+        resp = req.get(
+            'https://shop.tiktok.com/view/product/1729569820803458305',
+            proxies=proxies,
+            timeout=15,
+            verify=False,
+            headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+        )
+        results['tiktok'] = {
+            'status': resp.status_code,
+            'length': len(resp.text),
+            'has_captcha': 'verify' in resp.text.lower(),
+            'title_snippet': resp.text[:200] if len(resp.text) < 10000 else 'large page'
+        }
+    except Exception as e:
+        results['tiktok'] = f'Error: {str(e)}'
+
+    return jsonify(results)
+
+
 @app.route('/health')
 def health():
     """Health check endpoint for Railway."""
