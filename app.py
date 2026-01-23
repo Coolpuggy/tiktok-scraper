@@ -238,12 +238,27 @@ def scrape_reviews_with_progress(job_id, product_url, max_pages=50):
         job['status'] = 'loading'
         job['message'] = 'Loading product page...'
         print(f"[{job_id}] Loading URL: {product_url}")
-        driver.get(product_url)
-        time.sleep(4)  # Wait for page to load
 
-        # Log page title to verify page loaded
+        # First test proxy with a simple page
+        if local_proxy_port:
+            try:
+                driver.get('http://httpbin.org/ip')
+                time.sleep(2)
+                ip_text = driver.find_element('tag name', 'body').text
+                print(f"[{job_id}] Proxy IP check: {ip_text[:100]}")
+            except Exception as e:
+                print(f"[{job_id}] Proxy IP check failed: {e}")
+
+        driver.set_page_load_timeout(60)
+        driver.get(product_url)
+        time.sleep(6)  # Wait for page to load
+
+        # Log page title and source snippet to debug
         page_title = driver.title
-        print(f"[{job_id}] Page loaded. Title: {page_title}")
+        page_source_len = len(driver.page_source)
+        print(f"[{job_id}] Page loaded. Title: '{page_title}', source_len: {page_source_len}")
+        if page_source_len < 1000:
+            print(f"[{job_id}] Page source: {driver.page_source[:500]}")
 
         # Extract product title and image
         job['message'] = 'Extracting product info...'
