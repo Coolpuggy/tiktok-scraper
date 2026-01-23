@@ -257,7 +257,9 @@ def scrape_reviews_with_progress(job_id, product_url, max_pages=50):
                 # Extract reviews from current page
                 review_data = page.evaluate("""() => {
                     const reviews = [];
+                    const debug = {found_ratings: 0, skipped_no_container: 0, skipped_no_username: 0, skipped_short_text: 0};
                     const ratingElements = document.querySelectorAll('[aria-label*="Rating:"][aria-label*="out of 5 stars"]');
+                    debug.found_ratings = ratingElements.length;
 
                     ratingElements.forEach(ratingEl => {
                         try {
@@ -273,12 +275,12 @@ def scrape_reviews_with_progress(job_id, product_url, max_pages=50):
                                 if (text.length > 30 && /[A-Za-z]\\*+[A-Za-z0-9]/.test(text)) break;
                             }
 
-                            if (!container) return;
+                            if (!container) { debug.skipped_no_container++; return; }
                             const fullText = container.innerText || '';
 
                             const usernameMatch = fullText.match(/([A-Za-z]\\*+[A-Za-z0-9])/);
                             const username = usernameMatch ? usernameMatch[1] : '';
-                            if (!username) return;
+                            if (!username) { debug.skipped_no_username++; return; }
 
                             const dateMatch = fullText.match(/(\\d{4}-\\d{2}-\\d{2})/);
                             const date = dateMatch ? dateMatch[1] : '';
@@ -332,14 +334,22 @@ def scrape_reviews_with_progress(job_id, product_url, max_pages=50):
                                     date,
                                     item_variant: itemVariant
                                 });
+                            } else {
+                                debug.skipped_short_text++;
                             }
                         } catch (e) {}
                     });
-                    return reviews;
+                    return {reviews, debug};
                 }""")
 
+                # review_data is now {reviews: [...], debug: {...}}
+                page_reviews = review_data.get('reviews', []) if isinstance(review_data, dict) else review_data
+                debug_info = review_data.get('debug', {}) if isinstance(review_data, dict) else {}
+                print(f"[{job_id}] Page {current_page} debug: {debug_info}")
+                print(f"[{job_id}] Page {current_page}: found {len(page_reviews)} reviews")
+
                 # Deduplicate and add
-                for r in review_data:
+                for r in page_reviews:
                     key = r['review_text'][:50] if r['review_text'] else ''
                     if key and key not in seen_reviews:
                         seen_reviews.add(key)
@@ -431,9 +441,11 @@ def scrape_reviews_with_progress(job_id, product_url, max_pages=50):
                 }""")
 
                 if clicked:
-                    page.wait_for_timeout(1500)
+                    print(f"[{job_id}] Clicked next, waiting for page {current_page + 1}...")
+                    page.wait_for_timeout(2000)
                     current_page += 1
                 else:
+                    print(f"[{job_id}] No next button found after page {current_page}")
                     job['message'] = 'No more pages found'
                     break
 
@@ -596,6 +608,96 @@ def stream_status(job_id):
 
     return Response(generate(), mimetype='text/event-stream',
                     headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
+
+
+@app.route('/debug-dom/<job_id>')
+def debug_dom(job_id):
+    """Debug: dump DOM structure of reviews section from an active job."""
+    if job_id not in scrape_jobs:
+        return jsonify({'error': 'Job not found'}), 404
+
+    job = scrape_jobs[job_id]
+    page = job.get('_page')
+    if not page or job.get('_browser_closed'):
+        return jsonify({'error': 'No active browser'}), 400
+
+    try:
+        dom_info = page.evaluate("""() => {
+            const info = {
+                title: document.title,
+                url: window.location.href,
+                rating_elements: 0,
+                review_containers: [],
+                pagination_html: '',
+                all_aria_labels: [],
+            };
+
+            // Find rating elements
+            const ratings = document.querySelectorAll('[aria-label*="Rating"]');
+            info.rating_elements = ratings.length;
+
+            // Get first 3 review container HTML samples
+            ratings.forEach((el, i) => {
+                if (i >= 3) return;
+                let container = el;
+                for (let j = 0; j < 10; j++) {
+                    container = container.parentElement;
+                    if (!container) break;
+                    if (container.innerText && container.innerText.length > 50) break;
+                }
+                if (container) {
+                    info.review_containers.push({
+                        index: i,
+                        outerHTML: container.outerHTML.substring(0, 2000),
+                        innerText: container.innerText.substring(0, 500),
+                    });
+                }
+            });
+
+            // Find pagination
+            const paginations = document.querySelectorAll('[class*="pagination"], [class*="Pagination"], [class*="pager"], nav');
+            paginations.forEach((p, i) => {
+                if (i < 2) {
+                    info.pagination_html += p.outerHTML.substring(0, 1500) + '\\n---\\n';
+                }
+            });
+
+            // Also check for numbered page buttons
+            const pageButtons = document.querySelectorAll('button, [role="button"]');
+            const pageNums = [];
+            pageButtons.forEach(btn => {
+                const text = btn.innerText?.trim();
+                if (/^\\d+$/.test(text) && parseInt(text) > 0 && parseInt(text) < 200) {
+                    pageNums.push({text, classes: btn.className, ariaLabel: btn.getAttribute('aria-label')});
+                }
+            });
+            info.page_number_buttons = pageNums.slice(0, 20);
+
+            // Check for any "next" or arrow elements
+            const allEls = document.querySelectorAll('*');
+            const nextEls = [];
+            allEls.forEach(el => {
+                const aria = el.getAttribute('aria-label') || '';
+                const text = el.innerText?.trim() || '';
+                if ((aria.toLowerCase().includes('next') || text === '>' || text === '›' || text === '»' || text === 'Next')
+                    && el.getBoundingClientRect().width > 0) {
+                    nextEls.push({
+                        tag: el.tagName,
+                        text: text.substring(0, 50),
+                        aria: aria,
+                        classes: el.className?.substring?.(0, 100) || '',
+                        rect: el.getBoundingClientRect(),
+                    });
+                }
+            });
+            info.next_elements = nextEls.slice(0, 10);
+
+            return info;
+        }""")
+
+        return jsonify(dom_info)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 
 @app.route('/health')
