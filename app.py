@@ -37,6 +37,9 @@ def extract_product_id(url):
 
 
 
+NUM_WORKERS = 3  # Number of parallel browser tabs for scraping
+
+
 def scrape_reviews_with_progress(job_id, product_url, max_pages=50):
     """Scrape reviews with manual CAPTCHA solving via browser view."""
     job = scrape_jobs[job_id]
@@ -311,31 +314,11 @@ def scrape_reviews_with_progress(job_id, product_url, max_pages=50):
             except Exception as debug_err:
                 print(f"[{job_id}] DOM debug error: {debug_err}")
 
-            current_page = 1
-
-            while current_page <= max_pages:
-                job['current_page'] = current_page
-                job['max_pages'] = max_pages
-                job['message'] = f'Scraping page {current_page}...'
-                job['progress'] = int((current_page / max_pages) * 100)
-
-                # Wait for reviews to be present on the page (up to 2 seconds)
-                for wait_try in range(4):
-                    rc = page.evaluate("""() => {
-                        return document.querySelectorAll('[aria-label*="Rating:"][aria-label*="out of 5 stars"]').length;
-                    }""")
-                    if rc >= 2:
-                        break
-                    page.wait_for_timeout(500)
-
-                # Extract reviews from current page
-                review_data = page.evaluate("""() => {
+            # Helper: extract reviews from a page
+            def extract_reviews_js():
+                return """() => {
                     const reviews = [];
-                    const debug = {found_ratings: 0, extracted: 0, method: ''};
-
-                    // Method 1: Find rating elements with aria-label
                     const ratingElements = document.querySelectorAll('[aria-label*="Rating:"][aria-label*="out of 5 stars"]');
-                    debug.found_ratings = ratingElements.length;
 
                     ratingElements.forEach(ratingEl => {
                         try {
@@ -343,18 +326,14 @@ def scrape_reviews_with_progress(job_id, product_url, max_pages=50):
                             const ratingMatch = ariaLabel.match(/Rating:\\s*(\\d+(?:\\.\\d+)?)\\s*out of 5/);
                             const rating = ratingMatch ? Math.round(parseFloat(ratingMatch[1])) : 0;
 
-                            // Walk up to find the review container
-                            // Look for a container that has multiple distinct sections
                             let container = ratingEl;
                             for (let i = 0; i < 12; i++) {
                                 container = container.parentElement;
                                 if (!container) break;
                                 const text = container.innerText || '';
-                                // A review container typically has >50 chars and contains a date or username
                                 if (text.length > 40 && (
                                     /\\d{4}-\\d{2}-\\d{2}/.test(text) ||
                                     /[A-Za-z0-9]\\*+[A-Za-z0-9]/.test(text) ||
-                                    /\\d+\\/\\d+\\/\\d+/.test(text) ||
                                     /ago/.test(text)
                                 )) break;
                             }
@@ -363,12 +342,9 @@ def scrape_reviews_with_progress(job_id, product_url, max_pages=50):
                             const fullText = container.innerText || '';
                             const lines = fullText.split('\\n').map(l => l.trim()).filter(l => l);
 
-                            // Extract username - multiple patterns
                             let username = '';
-                            // Pattern 1: masked username like J***n or a***2
                             const maskedMatch = fullText.match(/([A-Za-z0-9]\\*{2,}[A-Za-z0-9])/);
                             if (maskedMatch) username = maskedMatch[1];
-                            // Pattern 2: short username-like string at start
                             if (!username && lines.length > 0) {
                                 const firstLine = lines[0];
                                 if (firstLine.length < 30 && firstLine.length > 1 && !/^\\d/.test(firstLine) && !firstLine.includes('Rating')) {
@@ -377,207 +353,209 @@ def scrape_reviews_with_progress(job_id, product_url, max_pages=50):
                             }
                             if (!username) username = 'Anonymous';
 
-                            // Extract date
                             let date = '';
                             const dateMatch = fullText.match(/(\\d{4}-\\d{2}-\\d{2})/);
-                            if (dateMatch) {
-                                date = dateMatch[1];
-                            } else {
-                                const relDateMatch = fullText.match(/(\\d+\\s*(?:day|week|month|year|hour|min)s?\\s*ago)/i);
-                                if (relDateMatch) date = relDateMatch[1];
+                            if (dateMatch) date = dateMatch[1];
+                            else {
+                                const relMatch = fullText.match(/(\\d+\\s*(?:day|week|month|year|hour|min)s?\\s*ago)/i);
+                                if (relMatch) date = relMatch[1];
                             }
 
-                            // Extract item variant
                             let itemVariant = '';
-                            for (let i = 0; i < lines.length; i++) {
-                                const line = lines[i];
-                                if (/^Item:/i.test(line)) {
-                                    itemVariant = line.replace(/^Item:\\s*/i, '');
-                                    if (!itemVariant && lines[i+1]) itemVariant = lines[i+1];
-                                    break;
-                                }
-                                if (/^(Color|Size|Variant|Style):/i.test(line)) {
-                                    itemVariant = line;
-                                    break;
-                                }
-                            }
-
-                            // Extract review text - find the longest meaningful line
-                            // that isn't a username, date, or metadata
-                            let reviewText = '';
-                            const skipPatterns = [
-                                /^(Verified|Helpful|Reply|Report|Like|Share)/i,
-                                /^(Item:|Color:|Size:|Variant:|Style:)/i,
-                                /^\\d{4}-\\d{2}-\\d{2}$/,
-                                /^\\d+\\s*(day|week|month|year|hour|min)/i,
-                                /^\\d+$/,
-                                /^Rating:/,
-                                /^[A-Za-z0-9]\\*{2,}[A-Za-z0-9]$/,
-                            ];
-
                             for (const line of lines) {
-                                if (line.length < 5) continue;
-                                if (line === username) continue;
-                                if (line === itemVariant) continue;
-                                if (line === date) continue;
-                                let skip = false;
-                                for (const pat of skipPatterns) {
-                                    if (pat.test(line)) { skip = true; break; }
-                                }
-                                if (skip) continue;
-                                // Take the longest line as review text
-                                if (line.length > reviewText.length) {
-                                    reviewText = line;
-                                }
+                                if (/^Item:/i.test(line)) { itemVariant = line.replace(/^Item:\\s*/i, ''); break; }
+                                if (/^(Color|Size|Variant|Style):/i.test(line)) { itemVariant = line; break; }
                             }
 
-                            // Accept reviews with any text (even short ones like "Great!")
+                            let reviewText = '';
+                            const skipPats = [/^(Verified|Helpful|Reply|Report|Like|Share)/i, /^(Item:|Color:|Size:|Variant:|Style:)/i,
+                                /^\\d{4}-\\d{2}-\\d{2}$/, /^\\d+\\s*(day|week|month|year|hour|min)/i, /^\\d+$/, /^Rating:/, /^[A-Za-z0-9]\\*{2,}[A-Za-z0-9]$/];
+                            for (const line of lines) {
+                                if (line.length < 3 || line === username || line === itemVariant || line === date) continue;
+                                let skip = false;
+                                for (const p of skipPats) { if (p.test(line)) { skip = true; break; } }
+                                if (!skip && line.length > reviewText.length) reviewText = line;
+                            }
+
                             if (reviewText.length >= 1 || rating > 0) {
-                                reviews.push({
-                                    username,
-                                    rating,
-                                    review_text: reviewText || '(no text)',
-                                    date,
-                                    item_variant: itemVariant
-                                });
+                                reviews.push({ username, rating, review_text: reviewText || '(no text)', date, item_variant: itemVariant });
                             }
                         } catch (e) {}
                     });
+                    return reviews;
+                }"""
 
-                    debug.extracted = reviews.length;
-                    debug.method = 'aria-label ratings';
-                    return {reviews, debug};
-                }""")
-
-                # review_data is now {reviews: [...], debug: {...}}
-                page_reviews = review_data.get('reviews', []) if isinstance(review_data, dict) else review_data
-                debug_info = review_data.get('debug', {}) if isinstance(review_data, dict) else {}
-                print(f"[{job_id}] Page {current_page} debug: {debug_info}")
-                print(f"[{job_id}] Page {current_page}: found {len(page_reviews)} reviews")
-
-                # Deduplicate and add
-                for r in page_reviews:
-                    key = r['review_text'][:50] if r['review_text'] else ''
-                    if key and key not in seen_reviews:
-                        seen_reviews.add(key)
-                        reviews.append(r)
-
-                job['reviews'] = reviews.copy()
-                job['review_count'] = len(reviews)
-
-                if current_page >= max_pages:
-                    break
-
-                # Save HTML only on first page (for debugging)
-                if current_page == 1:
-                    try:
-                        full_html = page.evaluate("() => document.documentElement.outerHTML")
-                        with open('/tmp/last_page.html', 'w', encoding='utf-8') as f:
-                            f.write(full_html)
-                        print(f"[{job_id}] Saved page HTML ({len(full_html)} chars)")
-                    except Exception:
-                        pass
-
-                # Scroll down to ensure pagination is in view
-                page.evaluate("""() => {
-                    const ratings = document.querySelectorAll('[aria-label*="Rating:"][aria-label*="out of 5 stars"]');
-                    if (ratings.length > 0) {
-                        const last = ratings[ratings.length - 1];
-                        last.scrollIntoView({block: 'start'});
-                        window.scrollBy(0, 400);
-                    } else {
-                        window.scrollBy(0, 600);
-                    }
-                }""")
-                page.wait_for_timeout(1000)
-
-                next_page = current_page + 1
-
-                # TikTok uses <div> elements for pagination (not button/a).
-                # Structure: div.flex.gap-12 > [Previous div] [Page numbers div.flex.gap-6] [Next div]
-                # The "Next" div contains a child <div class="Headline-Semibold">Next</div> + SVG
-                # Page numbers are: div.w-32.h-32.cursor-pointer with text content
-                # Active page has class "background-color-UIText1"
-                click_result = page.evaluate(f"""() => {{
-                    // Strategy 1: Find the div containing "Next" text with Headline-Semibold class
-                    // This is TikTok's specific pagination structure
+            # Helper: click Next button on TikTok pagination
+            def click_next_js():
+                return """() => {
                     const headlineDivs = document.querySelectorAll('div.Headline-Semibold');
-                    for (const div of headlineDivs) {{
-                        if (div.innerText.trim() === 'Next') {{
-                            // Click the parent div (which has the cursor-pointer and click handler)
+                    for (const div of headlineDivs) {
+                        if (div.innerText.trim() === 'Next') {
                             const clickTarget = div.parentElement;
-                            if (clickTarget) {{
+                            if (clickTarget) {
                                 const rect = clickTarget.getBoundingClientRect();
-                                if (rect.width > 0 && rect.height > 0) {{
-                                    // Check if disabled (has UITextPlaceholder class = greyed out)
+                                if (rect.width > 0 && rect.height > 0) {
                                     const isDisabled = clickTarget.className.includes('UITextPlaceholder');
-                                    if (!isDisabled) {{
-                                        clickTarget.scrollIntoView({{block: 'center'}});
+                                    if (!isDisabled) {
+                                        clickTarget.scrollIntoView({block: 'center'});
                                         clickTarget.click();
-                                        return 'tiktok_next_div';
-                                    }} else {{
-                                        return 'tiktok_next_DISABLED';
-                                    }}
-                                }}
-                            }}
-                        }}
-                    }}
+                                        return true;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    return false;
+                }"""
 
-                    // Strategy 2: Find page number divs (w-32 h-32 cursor-pointer)
-                    // and click the target page number
+            # Helper: click specific page number
+            def click_page_js(target_page):
+                return f"""() => {{
                     const pageDivs = document.querySelectorAll('div.cursor-pointer');
                     for (const div of pageDivs) {{
                         const text = div.innerText.trim();
-                        if (text === String({next_page})) {{
+                        if (text === '{target_page}') {{
                             const rect = div.getBoundingClientRect();
                             if (rect.width > 0 && rect.width < 80 && rect.height > 0 && rect.height < 80) {{
                                 div.scrollIntoView({{block: 'center'}});
                                 div.click();
-                                return 'tiktok_page_number: ' + {next_page};
+                                return true;
                             }}
                         }}
                     }}
+                    return false;
+                }}"""
 
-                    // Strategy 3: Fallback - find any element with text "Next" anywhere
-                    const allDivs = document.querySelectorAll('div, button, a, span');
-                    for (const el of allDivs) {{
-                        // Only match elements whose own text is "Next" (not children)
-                        const ownText = Array.from(el.childNodes)
-                            .filter(n => n.nodeType === 3)
-                            .map(n => n.textContent.trim())
-                            .join('');
-                        const innerText = el.innerText?.trim();
-                        if (ownText === 'Next' || innerText === 'Next') {{
-                            const rect = el.getBoundingClientRect();
-                            if (rect.width > 0 && rect.height > 0) {{
-                                // Try parent for click
-                                const target = el.parentElement || el;
-                                target.scrollIntoView({{block: 'center'}});
-                                target.click();
-                                return 'fallback_next_div';
-                            }}
-                        }}
-                    }}
+            # Helper: navigate to a specific page by clicking page numbers
+            def navigate_to_page(tab, target_page):
+                """Navigate a tab to a specific page number by repeated Next clicks."""
+                for attempt in range(target_page - 1):
+                    tab.evaluate(click_next_js())
+                    tab.wait_for_timeout(800)
 
-                    return null;
-                }}""")
+            # Helper: scrape a range of pages using a given tab
+            def scrape_page_range(tab, start_page, end_page, worker_id):
+                """Scrape pages start_page through end_page on given tab."""
+                worker_reviews = []
+                current = start_page
 
-                if click_result:
-                    print(f"[{job_id}] Pagination: {click_result} -> page {next_page}")
-                    # Wait for new reviews to load
-                    page.wait_for_timeout(1500)
-                    for wait_attempt in range(4):
-                        rating_count = page.evaluate("""() => {
-                            return document.querySelectorAll('[aria-label*="Rating:"][aria-label*="out of 5 stars"]').length;
-                        }""")
-                        if rating_count >= 2:
+                while current <= end_page:
+                    # Wait for ratings to appear
+                    for _ in range(4):
+                        rc = tab.evaluate("""() => document.querySelectorAll('[aria-label*="Rating:"][aria-label*="out of 5 stars"]').length""")
+                        if rc >= 2:
                             break
-                        page.wait_for_timeout(500)
-                    current_page += 1
-                else:
-                    print(f"[{job_id}] No pagination found after page {current_page}")
-                    job['message'] = 'No more pages found'
-                    break
+                        tab.wait_for_timeout(400)
+
+                    # Extract reviews
+                    page_reviews = tab.evaluate(extract_reviews_js())
+                    if isinstance(page_reviews, list):
+                        worker_reviews.extend(page_reviews)
+                    print(f"[{job_id}][W{worker_id}] Page {current}: {len(page_reviews) if isinstance(page_reviews, list) else 0} reviews")
+
+                    # Update job progress
+                    job['current_page'] = max(job.get('current_page', 0), current)
+                    job['message'] = f'Scraping page {current}...'
+
+                    if current >= end_page:
+                        break
+
+                    # Click Next
+                    clicked = tab.evaluate(click_next_js())
+                    if not clicked:
+                        print(f"[{job_id}][W{worker_id}] No Next button at page {current}")
+                        break
+
+                    # Wait for new content (just 800ms - TikTok SPA is fast)
+                    tab.wait_for_timeout(800)
+                    current += 1
+
+                return worker_reviews
+
+            # Determine if we should use parallel workers
+            use_parallel = max_pages > 10 and NUM_WORKERS > 1
+
+            if not use_parallel:
+                # Single worker - simple sequential scraping
+                print(f"[{job_id}] Single worker mode for {max_pages} pages")
+                all_reviews = scrape_page_range(page, 1, max_pages, 0)
+                for r in all_reviews:
+                    key = r.get('review_text', '')[:50]
+                    if key and key not in seen_reviews:
+                        seen_reviews.add(key)
+                        reviews.append(r)
+            else:
+                # Parallel workers - split pages across multiple tabs
+                print(f"[{job_id}] Parallel mode: {NUM_WORKERS} workers for {max_pages} pages")
+
+                # Worker 1 uses the existing page (already on page 1)
+                # Other workers open new tabs and navigate to their start page
+                pages_per_worker = max_pages // NUM_WORKERS
+                worker_tabs = [page]  # First worker uses existing tab
+
+                # Create additional tabs
+                for w in range(1, NUM_WORKERS):
+                    try:
+                        new_tab = context.new_page()
+                        new_tab.goto(product_url, timeout=30000, wait_until='domcontentloaded')
+                        new_tab.wait_for_timeout(2000)
+                        # Scroll to reviews section
+                        for i in range(6):
+                            new_tab.evaluate(f"window.scrollTo(0, document.body.scrollHeight * {0.2 + i*0.1})")
+                            new_tab.wait_for_timeout(300)
+                        worker_tabs.append(new_tab)
+                        print(f"[{job_id}] Worker {w} tab created")
+                    except Exception as tab_err:
+                        print(f"[{job_id}] Failed to create worker {w} tab: {tab_err}")
+
+                num_workers = len(worker_tabs)
+                pages_per_worker = max_pages // num_workers
+
+                # Navigate each worker to its start page
+                for w in range(1, num_workers):
+                    start_page = w * pages_per_worker + 1
+                    print(f"[{job_id}] Worker {w} navigating to page {start_page}...")
+                    # Click the start page number directly if visible, otherwise use Next
+                    tab = worker_tabs[w]
+                    # Navigate by clicking page numbers or Next repeatedly
+                    target = start_page
+                    # Try clicking the page number directly first
+                    clicked = tab.evaluate(click_page_js(target))
+                    if not clicked:
+                        # Navigate sequentially with Next
+                        for p in range(target - 1):
+                            tab.evaluate(click_next_js())
+                            tab.wait_for_timeout(600)
+                    else:
+                        tab.wait_for_timeout(800)
+                    print(f"[{job_id}] Worker {w} ready at page {start_page}")
+
+                # Now run all workers (sequentially since Playwright is single-threaded)
+                for w in range(num_workers):
+                    start_page = w * pages_per_worker + 1
+                    end_page = (w + 1) * pages_per_worker if w < num_workers - 1 else max_pages
+                    print(f"[{job_id}] Worker {w}: pages {start_page}-{end_page}")
+
+                    worker_reviews = scrape_page_range(worker_tabs[w], start_page, end_page, w)
+                    for r in worker_reviews:
+                        key = r.get('review_text', '')[:50]
+                        if key and key not in seen_reviews:
+                            seen_reviews.add(key)
+                            reviews.append(r)
+
+                    job['reviews'] = reviews.copy()
+                    job['review_count'] = len(reviews)
+                    job['progress'] = int((end_page / max_pages) * 100)
+
+                # Close extra tabs
+                for w in range(1, num_workers):
+                    try:
+                        worker_tabs[w].close()
+                    except Exception:
+                        pass
+
+            job['reviews'] = reviews.copy()
+            job['review_count'] = len(reviews)
 
             job['status'] = 'complete'
             job['message'] = f'Done! Found {len(reviews)} reviews'
