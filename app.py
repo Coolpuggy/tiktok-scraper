@@ -468,218 +468,145 @@ def scrape_reviews_with_progress(job_id, product_url, max_pages=50):
                 if current_page >= max_pages:
                     break
 
-                # Click Next button - scroll to make pagination visible
+                # Save the full page HTML on the first page for debugging
+                if current_page == 1:
+                    try:
+                        full_html = page.evaluate("() => document.documentElement.outerHTML")
+                        job['_page_html'] = full_html
+                        print(f"[{job_id}] Saved full page HTML ({len(full_html)} chars)")
+                    except Exception as html_err:
+                        print(f"[{job_id}] Failed to save page HTML: {html_err}")
+
+                # Scroll down to ensure pagination is in view
                 page.evaluate("""() => {
-                    window.scrollBy(0, 400);
+                    // Find the last rating element and scroll past it
+                    const ratings = document.querySelectorAll('[aria-label*="Rating:"][aria-label*="out of 5 stars"]');
+                    if (ratings.length > 0) {
+                        const last = ratings[ratings.length - 1];
+                        last.scrollIntoView({block: 'start'});
+                        window.scrollBy(0, 300);
+                    } else {
+                        window.scrollBy(0, 600);
+                    }
                 }""")
-                page.wait_for_timeout(500)
+                page.wait_for_timeout(1000)
 
                 next_page = current_page + 1
 
-                # Capture full pagination DOM for debugging (stored in job for /debug-dom endpoint)
-                pagination_debug = page.evaluate("""() => {
-                    const result = {
-                        page_numbers: [],
-                        next_prev: [],
-                        full_html: '',
-                        all_near_numbers: []
-                    };
+                # Use page.locator to find and click the Next button with Playwright's
+                # built-in waiting and actionability checks
+                clicked = False
+                click_method = ''
 
-                    // Find all numbered elements
-                    const clickables = document.querySelectorAll('button, a, span, li, div, [role="button"]');
-                    const numbered = [];
-                    for (const el of clickables) {
-                        const text = (el.innerText || '').trim();
-                        if (/^\\d+$/.test(text)) {
-                            const rect = el.getBoundingClientRect();
-                            if (rect.width > 0 && rect.width < 100 && rect.top > 300) {
-                                numbered.push({el, rect, text});
-                                result.page_numbers.push({
-                                    text,
-                                    tag: el.tagName,
-                                    class: (el.className || '').substring(0, 150),
-                                    top: Math.round(rect.top),
-                                    left: Math.round(rect.left),
-                                    outerHTML: el.outerHTML.substring(0, 200)
-                                });
-                            }
-                        }
-                    }
+                try:
+                    # Try clicking a button/link containing "Next" text
+                    next_btn = page.locator('button:has-text("Next"), a:has-text("Next")').first
+                    if next_btn.count() > 0 and next_btn.is_visible():
+                        next_btn.scroll_into_view_if_needed()
+                        next_btn.click()
+                        clicked = True
+                        click_method = 'locator_next_text'
+                except Exception as e:
+                    print(f"[{job_id}] Locator 'Next' failed: {e}")
 
-                    // Find Next/Previous elements
-                    for (const el of clickables) {
-                        const text = (el.innerText || el.textContent || '').trim();
-                        if (/next|prev|previous|←|→|›|»/i.test(text) && text.length < 50) {
-                            const rect = el.getBoundingClientRect();
-                            if (rect.width > 0 && rect.top > 200) {
-                                result.next_prev.push({
-                                    text: text.substring(0, 50),
-                                    tag: el.tagName,
-                                    class: (el.className || '').substring(0, 150),
-                                    ariaLabel: el.getAttribute('aria-label') || '',
-                                    disabled: el.disabled || el.getAttribute('aria-disabled') === 'true',
-                                    top: Math.round(rect.top),
-                                    left: Math.round(rect.left),
-                                    width: Math.round(rect.width),
-                                    outerHTML: el.outerHTML.substring(0, 400)
-                                });
-                            }
-                        }
-                    }
+                if not clicked:
+                    try:
+                        # Try clicking the page number directly
+                        page_btn = page.locator(f'button:has-text("{next_page}"), a:has-text("{next_page}")').first
+                        if page_btn.count() > 0 and page_btn.is_visible():
+                            page_btn.scroll_into_view_if_needed()
+                            page_btn.click()
+                            clicked = True
+                            click_method = f'locator_page_{next_page}'
+                    except Exception as e:
+                        print(f"[{job_id}] Locator page number failed: {e}")
 
-                    // Get full pagination container HTML
-                    if (numbered.length > 0) {
-                        let container = numbered[0].el;
-                        for (let i = 0; i < 8; i++) {
-                            container = container.parentElement;
-                            if (!container) break;
-                            const nums = container.querySelectorAll('button, a, span, [role="button"]');
-                            let numCount = 0;
-                            for (const n of nums) {
-                                if (/^\\d+$/.test((n.innerText || '').trim())) numCount++;
-                            }
-                            if (numCount >= 2 && container.getBoundingClientRect().width > 100) {
-                                result.full_html = container.outerHTML.substring(0, 5000);
-                                break;
-                            }
-                        }
+                if not clicked:
+                    try:
+                        # Try aria-label approach
+                        next_aria = page.locator('[aria-label*="next" i], [aria-label*="Next"]').first
+                        if next_aria.count() > 0 and next_aria.is_visible():
+                            next_aria.scroll_into_view_if_needed()
+                            next_aria.click()
+                            clicked = True
+                            click_method = 'locator_aria_next'
+                    except Exception as e:
+                        print(f"[{job_id}] Locator aria next failed: {e}")
 
-                        // Find ALL elements at the same vertical level as page numbers
-                        const targetTop = numbered[0].rect.top;
-                        for (const el of clickables) {
-                            const rect = el.getBoundingClientRect();
-                            if (Math.abs(rect.top - targetTop) < 30 && rect.width > 0) {
-                                result.all_near_numbers.push({
-                                    text: (el.innerText || '').trim().substring(0, 50),
-                                    tag: el.tagName,
-                                    class: (el.className || '').substring(0, 100),
-                                    ariaLabel: el.getAttribute('aria-label') || '',
-                                    left: Math.round(rect.left),
-                                    width: Math.round(rect.width),
-                                    outerHTML: el.outerHTML.substring(0, 300)
-                                });
-                            }
-                        }
-                    }
+                if not clicked:
+                    # Fallback: use evaluate to find and click
+                    click_result = page.evaluate(f"""(targetPage) => {{
+                        const allClickable = document.querySelectorAll('button, a, [role="button"]');
 
-                    return result;
-                }""")
-
-                # Store debug info in job for retrieval via /debug-dom endpoint
-                job['_pagination_debug'] = pagination_debug
-                print(f"[{job_id}] Page {current_page} pagination: numbers={[p['text'] for p in pagination_debug.get('page_numbers', [])]}")
-                print(f"[{job_id}] Next/Prev elements: {[(n['text'][:20], n['tag'], n.get('disabled')) for n in pagination_debug.get('next_prev', [])]}")
-                if pagination_debug.get('full_html'):
-                    print(f"[{job_id}] Pagination HTML: {pagination_debug['full_html'][:500]}")
-
-                clicked = page.evaluate(f"""(targetPage) => {{
-                    const allClickable = document.querySelectorAll('button, a, [role="button"], nav button, nav a');
-
-                    // Strategy 1: Find a button/link whose text contains "Next"
-                    // No position filter - we already scrolled the page
-                    for (const el of allClickable) {{
-                        const text = (el.innerText || el.textContent || '').trim();
-                        if (/\\bnext\\b/i.test(text)) {{
-                            const rect = el.getBoundingClientRect();
-                            if (rect.width > 0 && rect.height > 0) {{
-                                const isDisabled = el.disabled || el.getAttribute('aria-disabled') === 'true' ||
-                                    el.classList.contains('disabled') || el.hasAttribute('disabled') ||
-                                    el.getAttribute('tabindex') === '-1';
-                                if (!isDisabled) {{
+                        // Find anything with "next" in text
+                        for (const el of allClickable) {{
+                            const text = (el.innerText || el.textContent || '').toLowerCase().trim();
+                            if (text.includes('next')) {{
+                                const rect = el.getBoundingClientRect();
+                                if (rect.width > 0 && rect.height > 0) {{
                                     el.scrollIntoView({{block: 'center'}});
                                     el.click();
-                                    return 'next_text: ' + text.substring(0, 20);
-                                }} else {{
-                                    return 'next_DISABLED: ' + text.substring(0, 20);
+                                    return 'js_next: ' + text.substring(0, 30);
                                 }}
                             }}
                         }}
-                    }}
 
-                    // Strategy 2: Click the specific page number button if visible
-                    for (const el of allClickable) {{
-                        const innerText = (el.innerText || '').trim();
-                        if (innerText === String(targetPage)) {{
-                            const rect = el.getBoundingClientRect();
-                            if (rect.width > 0 && rect.width < 100 && rect.height > 0) {{
-                                const isDisabled = el.disabled || el.getAttribute('aria-disabled') === 'true';
-                                if (!isDisabled) {{
+                        // Find page number
+                        for (const el of allClickable) {{
+                            const text = (el.innerText || '').trim();
+                            if (text === String(targetPage)) {{
+                                const rect = el.getBoundingClientRect();
+                                if (rect.width > 0 && rect.width < 100 && rect.height > 0) {{
                                     el.scrollIntoView({{block: 'center'}});
                                     el.click();
-                                    return 'page_number';
+                                    return 'js_page_number';
                                 }}
                             }}
                         }}
-                    }}
-                    // Also check non-button elements for page numbers
-                    const otherEls = document.querySelectorAll('span, li, div');
-                    for (const el of otherEls) {{
-                        const text = (el.innerText || '').trim();
-                        if (text === String(targetPage) && el.children.length === 0) {{
-                            const rect = el.getBoundingClientRect();
-                            if (rect.width > 0 && rect.width < 80 && rect.height > 0) {{
-                                el.scrollIntoView({{block: 'center'}});
-                                el.click();
-                                return 'page_number_span';
-                            }}
-                        }}
-                    }}
 
-                    // Strategy 3: aria-label containing "next"
-                    for (const el of allClickable) {{
-                        const aria = (el.getAttribute('aria-label') || '').toLowerCase();
-                        if (aria.includes('next')) {{
-                            const rect = el.getBoundingClientRect();
-                            if (rect.width > 0 && rect.height > 0) {{
-                                const isDisabled = el.disabled || el.getAttribute('aria-disabled') === 'true';
-                                if (!isDisabled) {{
+                        // Find arrow characters
+                        for (const el of allClickable) {{
+                            const text = (el.innerText || '').trim();
+                            if (text === '>' || text === '›' || text === '»' || text === '→') {{
+                                const rect = el.getBoundingClientRect();
+                                if (rect.width > 0 && rect.height > 0) {{
                                     el.scrollIntoView({{block: 'center'}});
                                     el.click();
-                                    return 'aria_next';
+                                    return 'js_arrow: ' + text;
                                 }}
                             }}
                         }}
-                    }}
 
-                    // Strategy 4: Arrow text characters
-                    for (const el of allClickable) {{
-                        const text = (el.innerText || '').trim();
-                        if (text === '>' || text === '›' || text === '»' || text === '→' || text === '▶') {{
-                            const rect = el.getBoundingClientRect();
-                            if (rect.width > 0 && rect.height > 0) {{
-                                const isDisabled = el.disabled || el.getAttribute('aria-disabled') === 'true';
-                                if (!isDisabled) {{
-                                    el.scrollIntoView({{block: 'center'}});
-                                    el.click();
-                                    return 'arrow_char';
-                                }}
-                            }}
-                        }}
-                    }}
+                        return null;
+                    }}""", next_page)
 
-                    return null;
-                }}""", next_page)
+                    if click_result:
+                        clicked = True
+                        click_method = click_result
 
                 if clicked:
-                    print(f"[{job_id}] Pagination click: {clicked} -> page {current_page + 1}")
-                    # Wait for new reviews to load - check until rating elements appear
-                    # or timeout after 5 seconds
-                    page.wait_for_timeout(1000)  # initial wait
-                    for wait_attempt in range(8):  # up to 4 more seconds
+                    print(f"[{job_id}] Pagination click: {click_method} -> page {next_page}")
+                    # Wait for new reviews to load
+                    page.wait_for_timeout(2000)
+                    # Verify page actually changed by checking if new reviews appeared
+                    for wait_attempt in range(6):
                         rating_count = page.evaluate("""() => {
                             return document.querySelectorAll('[aria-label*="Rating:"][aria-label*="out of 5 stars"]').length;
                         }""")
-                        if rating_count >= 3:
-                            print(f"[{job_id}] Page loaded: {rating_count} rating elements found")
+                        if rating_count >= 2:
+                            print(f"[{job_id}] Page loaded: {rating_count} ratings found")
                             break
                         page.wait_for_timeout(500)
-                    else:
-                        print(f"[{job_id}] Timeout waiting for reviews, proceeding anyway")
-                    # Extra wait for full render
                     page.wait_for_timeout(1000)
                     current_page += 1
                 else:
                     print(f"[{job_id}] No pagination found after page {current_page}")
+                    # Save HTML for debugging on failure too
+                    try:
+                        full_html = page.evaluate("() => document.documentElement.outerHTML")
+                        job['_page_html'] = full_html
+                    except Exception:
+                        pass
                     job['message'] = 'No more pages found'
                     break
 
@@ -853,11 +780,24 @@ def debug_dom(job_id):
     job = scrape_jobs[job_id]
     return jsonify({
         'dom_debug': job.get('_dom_debug', {}),
-        'pagination_debug': job.get('_pagination_debug', {}),
         'status': job.get('status'),
         'current_page': job.get('current_page'),
         'review_count': job.get('review_count'),
     })
+
+
+@app.route('/debug-html/<job_id>')
+def debug_html(job_id):
+    """Return the saved page HTML for debugging pagination."""
+    if job_id not in scrape_jobs:
+        return Response('Job not found', status=404)
+
+    job = scrape_jobs[job_id]
+    html = job.get('_page_html', '')
+    if not html:
+        return Response('No HTML saved yet - job may still be loading', status=404)
+
+    return Response(html, mimetype='text/html')
 
 
 @app.route('/health')
