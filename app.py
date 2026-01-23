@@ -573,19 +573,24 @@ def scrape_reviews_with_progress(job_id, product_url, max_pages=50):
                     print(f"[{job_id}] Pagination HTML: {pagination_debug['full_html'][:500]}")
 
                 clicked = page.evaluate(f"""(targetPage) => {{
-                    // Strategy 1: Find a button/link whose text contains "Next" (handles "Next →" too)
-                    const allClickable = document.querySelectorAll('button, a, [role="button"]');
+                    const allClickable = document.querySelectorAll('button, a, [role="button"], nav button, nav a');
+
+                    // Strategy 1: Find a button/link whose text contains "Next"
+                    // No position filter - we already scrolled the page
                     for (const el of allClickable) {{
                         const text = (el.innerText || el.textContent || '').trim();
                         if (/\\bnext\\b/i.test(text)) {{
                             const rect = el.getBoundingClientRect();
-                            if (rect.width > 0 && rect.height > 0 && rect.top > 200) {{
+                            if (rect.width > 0 && rect.height > 0) {{
                                 const isDisabled = el.disabled || el.getAttribute('aria-disabled') === 'true' ||
-                                    el.classList.contains('disabled') || el.hasAttribute('disabled');
+                                    el.classList.contains('disabled') || el.hasAttribute('disabled') ||
+                                    el.getAttribute('tabindex') === '-1';
                                 if (!isDisabled) {{
                                     el.scrollIntoView({{block: 'center'}});
                                     el.click();
-                                    return 'next_text';
+                                    return 'next_text: ' + text.substring(0, 20);
+                                }} else {{
+                                    return 'next_DISABLED: ' + text.substring(0, 20);
                                 }}
                             }}
                         }}
@@ -593,15 +598,10 @@ def scrape_reviews_with_progress(job_id, product_url, max_pages=50):
 
                     // Strategy 2: Click the specific page number button if visible
                     for (const el of allClickable) {{
-                        // Check direct text content (not nested children text)
-                        const directText = Array.from(el.childNodes)
-                            .filter(n => n.nodeType === 3)
-                            .map(n => n.textContent.trim())
-                            .join('');
                         const innerText = (el.innerText || '').trim();
-                        if (directText === String(targetPage) || innerText === String(targetPage)) {{
+                        if (innerText === String(targetPage)) {{
                             const rect = el.getBoundingClientRect();
-                            if (rect.width > 0 && rect.width < 100 && rect.height > 0 && rect.top > 200) {{
+                            if (rect.width > 0 && rect.width < 100 && rect.height > 0) {{
                                 const isDisabled = el.disabled || el.getAttribute('aria-disabled') === 'true';
                                 if (!isDisabled) {{
                                     el.scrollIntoView({{block: 'center'}});
@@ -611,13 +611,13 @@ def scrape_reviews_with_progress(job_id, product_url, max_pages=50):
                             }}
                         }}
                     }}
-                    // Also check span/li elements that might be clickable
-                    const spanEls = document.querySelectorAll('span, li, div');
-                    for (const el of spanEls) {{
+                    // Also check non-button elements for page numbers
+                    const otherEls = document.querySelectorAll('span, li, div');
+                    for (const el of otherEls) {{
                         const text = (el.innerText || '').trim();
                         if (text === String(targetPage) && el.children.length === 0) {{
                             const rect = el.getBoundingClientRect();
-                            if (rect.width > 0 && rect.width < 80 && rect.height > 0 && rect.top > 200) {{
+                            if (rect.width > 0 && rect.width < 80 && rect.height > 0) {{
                                 el.scrollIntoView({{block: 'center'}});
                                 el.click();
                                 return 'page_number_span';
@@ -630,7 +630,7 @@ def scrape_reviews_with_progress(job_id, product_url, max_pages=50):
                         const aria = (el.getAttribute('aria-label') || '').toLowerCase();
                         if (aria.includes('next')) {{
                             const rect = el.getBoundingClientRect();
-                            if (rect.width > 0 && rect.height > 0 && rect.top > 200) {{
+                            if (rect.width > 0 && rect.height > 0) {{
                                 const isDisabled = el.disabled || el.getAttribute('aria-disabled') === 'true';
                                 if (!isDisabled) {{
                                     el.scrollIntoView({{block: 'center'}});
@@ -646,39 +646,12 @@ def scrape_reviews_with_progress(job_id, product_url, max_pages=50):
                         const text = (el.innerText || '').trim();
                         if (text === '>' || text === '›' || text === '»' || text === '→' || text === '▶') {{
                             const rect = el.getBoundingClientRect();
-                            if (rect.width > 0 && rect.height > 0 && rect.top > 200) {{
+                            if (rect.width > 0 && rect.height > 0) {{
                                 const isDisabled = el.disabled || el.getAttribute('aria-disabled') === 'true';
                                 if (!isDisabled) {{
                                     el.scrollIntoView({{block: 'center'}});
                                     el.click();
                                     return 'arrow_char';
-                                }}
-                            }}
-                        }}
-                    }}
-
-                    // Strategy 5: Find active/current page button, click what's after it
-                    const smallBtns = Array.from(document.querySelectorAll('button, a, span, [role="button"]')).filter(el => {{
-                        const r = el.getBoundingClientRect();
-                        return r.width > 0 && r.width < 80 && r.height > 0 && r.height < 60 && r.top > 300;
-                    }});
-                    for (let i = 0; i < smallBtns.length; i++) {{
-                        const btn = smallBtns[i];
-                        const t = (btn.innerText || '').trim();
-                        if (t === String({current_page})) {{
-                            const style = window.getComputedStyle(btn);
-                            const fw = parseInt(style.fontWeight) || 400;
-                            const isActive = fw >= 600 ||
-                                btn.classList.contains('active') ||
-                                btn.getAttribute('aria-current') === 'true' ||
-                                btn.getAttribute('aria-current') === 'page';
-                            if (isActive && i + 1 < smallBtns.length) {{
-                                const nextBtn = smallBtns[i + 1];
-                                const nextDisabled = nextBtn.disabled || nextBtn.getAttribute('aria-disabled') === 'true';
-                                if (!nextDisabled) {{
-                                    nextBtn.scrollIntoView({{block: 'center'}});
-                                    nextBtn.click();
-                                    return 'active_sibling';
                                 }}
                             }}
                         }}
