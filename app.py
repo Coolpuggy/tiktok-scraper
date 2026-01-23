@@ -459,103 +459,193 @@ def scrape_reviews_with_progress(job_id, product_url, max_pages=50):
                 if current_page >= max_pages:
                     break
 
-                # Click Next button - scroll reviews section into view first
-                page.evaluate("window.scrollBy(0, 400)")
+                # Click Next button - scroll to make pagination visible
+                # First try to scroll the pagination area into view
+                page.evaluate("""() => {
+                    // Find anything that looks like pagination and scroll to it
+                    const candidates = document.querySelectorAll('button, a, [role="button"]');
+                    for (const el of candidates) {
+                        const text = (el.innerText || '').trim();
+                        if (/\\bnext\\b/i.test(text) || text === '>' || text === '›') {
+                            const rect = el.getBoundingClientRect();
+                            if (rect.width > 0 && rect.top > 200) {
+                                el.scrollIntoView({block: 'center'});
+                                return;
+                            }
+                        }
+                    }
+                    // Fallback: scroll down
+                    window.scrollBy(0, 400);
+                }""")
                 page.wait_for_timeout(500)
 
                 next_page = current_page + 1
-                clicked = page.evaluate(f"""(targetPage) => {{
-                    // Strategy 1: Click the specific page number button
-                    const allClickable = document.querySelectorAll('button, a, span, div, li, [role="button"]');
-                    for (const el of allClickable) {{
-                        const text = el.innerText?.trim();
-                        if (text === String(targetPage)) {{
+
+                # First, capture what the pagination area looks like for debugging
+                pagination_debug = page.evaluate("""() => {
+                    const info = {containers: [], allButtons: []};
+
+                    // Find all potential pagination containers
+                    const allEls = document.querySelectorAll('*');
+                    for (const el of allEls) {
+                        const cls = el.className || '';
+                        if (typeof cls === 'string' && (cls.toLowerCase().includes('paginat') || cls.toLowerCase().includes('pager'))) {
                             const rect = el.getBoundingClientRect();
-                            // Must be visible and in the lower part of the page (review area)
+                            if (rect.width > 0 && rect.top > 200) {
+                                info.containers.push({
+                                    tag: el.tagName,
+                                    class: cls.substring(0, 100),
+                                    html: el.innerHTML.substring(0, 500),
+                                    childCount: el.children.length,
+                                    top: Math.round(rect.top)
+                                });
+                            }
+                        }
+                    }
+
+                    // Find all visible buttons/links in the review area
+                    const clickables = document.querySelectorAll('button, a, [role="button"]');
+                    for (const el of clickables) {
+                        const rect = el.getBoundingClientRect();
+                        if (rect.width > 0 && rect.height > 0 && rect.top > 400 && rect.width < 100) {
+                            const text = (el.innerText || '').trim();
+                            const aria = el.getAttribute('aria-label') || '';
+                            const hasSvg = el.querySelector('svg') ? true : false;
+                            const disabled = el.disabled || el.getAttribute('aria-disabled') === 'true' || el.classList.contains('disabled');
+                            if (text.length < 20 || hasSvg || aria) {
+                                info.allButtons.push({
+                                    tag: el.tagName,
+                                    text: text.substring(0, 30),
+                                    aria,
+                                    hasSvg,
+                                    disabled,
+                                    class: (el.className || '').substring(0, 80),
+                                    width: Math.round(rect.width),
+                                    height: Math.round(rect.height),
+                                    top: Math.round(rect.top)
+                                });
+                            }
+                        }
+                    }
+
+                    return info;
+                }""")
+                print(f"[{job_id}] Pagination debug (page {current_page}): containers={len(pagination_debug.get('containers', []))}, buttons={len(pagination_debug.get('allButtons', []))}")
+                if pagination_debug.get('containers'):
+                    for c in pagination_debug['containers'][:2]:
+                        print(f"[{job_id}]   Container: {c.get('tag')} class={c.get('class','')[:60]} children={c.get('childCount')}")
+                        print(f"[{job_id}]   HTML preview: {c.get('html','')[:200]}")
+                if pagination_debug.get('allButtons'):
+                    for b in pagination_debug['allButtons']:
+                        print(f"[{job_id}]   Button: tag={b.get('tag')} text='{b.get('text')}' aria='{b.get('aria')}' svg={b.get('hasSvg')} disabled={b.get('disabled')} class={b.get('class','')[:50]}")
+
+                clicked = page.evaluate(f"""(targetPage) => {{
+                    // Strategy 1: Find a button/link whose text contains "Next" (handles "Next →" too)
+                    const allClickable = document.querySelectorAll('button, a, [role="button"]');
+                    for (const el of allClickable) {{
+                        const text = (el.innerText || el.textContent || '').trim();
+                        if (/\\bnext\\b/i.test(text)) {{
+                            const rect = el.getBoundingClientRect();
+                            if (rect.width > 0 && rect.height > 0 && rect.top > 200) {{
+                                const isDisabled = el.disabled || el.getAttribute('aria-disabled') === 'true' ||
+                                    el.classList.contains('disabled') || el.hasAttribute('disabled');
+                                if (!isDisabled) {{
+                                    el.scrollIntoView({{block: 'center'}});
+                                    el.click();
+                                    return 'next_text';
+                                }}
+                            }}
+                        }}
+                    }}
+
+                    // Strategy 2: Click the specific page number button if visible
+                    for (const el of allClickable) {{
+                        // Check direct text content (not nested children text)
+                        const directText = Array.from(el.childNodes)
+                            .filter(n => n.nodeType === 3)
+                            .map(n => n.textContent.trim())
+                            .join('');
+                        const innerText = (el.innerText || '').trim();
+                        if (directText === String(targetPage) || innerText === String(targetPage)) {{
+                            const rect = el.getBoundingClientRect();
+                            if (rect.width > 0 && rect.width < 100 && rect.height > 0 && rect.top > 200) {{
+                                const isDisabled = el.disabled || el.getAttribute('aria-disabled') === 'true';
+                                if (!isDisabled) {{
+                                    el.scrollIntoView({{block: 'center'}});
+                                    el.click();
+                                    return 'page_number';
+                                }}
+                            }}
+                        }}
+                    }}
+                    // Also check span/li elements that might be clickable
+                    const spanEls = document.querySelectorAll('span, li, div');
+                    for (const el of spanEls) {{
+                        const text = (el.innerText || '').trim();
+                        if (text === String(targetPage) && el.children.length === 0) {{
+                            const rect = el.getBoundingClientRect();
                             if (rect.width > 0 && rect.width < 80 && rect.height > 0 && rect.top > 200) {{
                                 el.scrollIntoView({{block: 'center'}});
                                 el.click();
-                                return 'page_number';
+                                return 'page_number_span';
                             }}
                         }}
                     }}
 
-                    // Strategy 2: Find "Next" text button
-                    for (const el of allClickable) {{
-                        const text = el.innerText?.trim();
-                        if (text === 'Next' || text === 'next' || text === 'Next page') {{
-                            const rect = el.getBoundingClientRect();
-                            if (rect.width > 0 && rect.height > 0 && rect.top > 200) {{
-                                el.scrollIntoView({{block: 'center'}});
-                                el.click();
-                                return 'next_text';
-                            }}
-                        }}
-                    }}
-
-                    // Strategy 3: Find arrow buttons (>, ›, »)
-                    for (const el of allClickable) {{
-                        const text = el.innerText?.trim();
-                        if (text === '>' || text === '›' || text === '»' || text === '→') {{
-                            const rect = el.getBoundingClientRect();
-                            if (rect.width > 0 && rect.height > 0 && rect.top > 200) {{
-                                el.scrollIntoView({{block: 'center'}});
-                                el.click();
-                                return 'arrow';
-                            }}
-                        }}
-                    }}
-
-                    // Strategy 4: Find next button by aria-label
+                    // Strategy 3: aria-label containing "next"
                     for (const el of allClickable) {{
                         const aria = (el.getAttribute('aria-label') || '').toLowerCase();
-                        if (aria.includes('next') && (aria.includes('page') || aria.includes('review'))) {{
+                        if (aria.includes('next')) {{
                             const rect = el.getBoundingClientRect();
                             if (rect.width > 0 && rect.height > 0 && rect.top > 200) {{
-                                el.scrollIntoView({{block: 'center'}});
-                                el.click();
-                                return 'aria_next';
+                                const isDisabled = el.disabled || el.getAttribute('aria-disabled') === 'true';
+                                if (!isDisabled) {{
+                                    el.scrollIntoView({{block: 'center'}});
+                                    el.click();
+                                    return 'aria_next';
+                                }}
                             }}
                         }}
                     }}
 
-                    // Strategy 5: Find active/current page and click next sibling
-                    const containers = document.querySelectorAll('[class*="pagination"], [class*="Pagination"], [class*="pager"], [class*="page"], nav');
-                    for (const container of containers) {{
-                        const buttons = container.querySelectorAll('button, a, li, span, div');
-                        const arr = Array.from(buttons).filter(b => {{
-                            const r = b.getBoundingClientRect();
-                            return r.width > 0 && r.height > 0 && r.top > 200;
-                        }});
-                        for (let i = 0; i < arr.length; i++) {{
-                            const btn = arr[i];
-                            const isActive = btn.classList.contains('active') ||
-                                btn.getAttribute('aria-current') === 'true' ||
-                                btn.getAttribute('aria-current') === 'page' ||
-                                btn.classList.contains('selected') ||
-                                btn.classList.contains('current') ||
-                                window.getComputedStyle(btn).fontWeight >= 700;
-                            if (isActive && arr[i + 1]) {{
-                                arr[i + 1].scrollIntoView({{block: 'center'}});
-                                arr[i + 1].click();
-                                return 'active_sibling';
-                            }}
-                        }}
-                    }}
-
-                    // Strategy 6: SVG arrow in button
-                    const svgButtons = document.querySelectorAll('button svg, a svg, [role="button"] svg');
-                    for (const svg of svgButtons) {{
-                        const parent = svg.closest('button, a, [role="button"]');
-                        if (parent) {{
-                            const rect = parent.getBoundingClientRect();
+                    // Strategy 4: Arrow text characters
+                    for (const el of allClickable) {{
+                        const text = (el.innerText || '').trim();
+                        if (text === '>' || text === '›' || text === '»' || text === '→' || text === '▶') {{
+                            const rect = el.getBoundingClientRect();
                             if (rect.width > 0 && rect.height > 0 && rect.top > 200) {{
-                                const aria = (parent.getAttribute('aria-label') || '').toLowerCase();
-                                const text = parent.parentElement?.innerText || '';
-                                if (aria.includes('next') || text.includes('Next') || text.includes('next')) {{
-                                    parent.scrollIntoView({{block: 'center'}});
-                                    parent.click();
-                                    return 'svg_next';
+                                const isDisabled = el.disabled || el.getAttribute('aria-disabled') === 'true';
+                                if (!isDisabled) {{
+                                    el.scrollIntoView({{block: 'center'}});
+                                    el.click();
+                                    return 'arrow_char';
+                                }}
+                            }}
+                        }}
+                    }}
+
+                    // Strategy 5: Find active/current page button, click what's after it
+                    const smallBtns = Array.from(document.querySelectorAll('button, a, span, [role="button"]')).filter(el => {{
+                        const r = el.getBoundingClientRect();
+                        return r.width > 0 && r.width < 80 && r.height > 0 && r.height < 60 && r.top > 300;
+                    }});
+                    for (let i = 0; i < smallBtns.length; i++) {{
+                        const btn = smallBtns[i];
+                        const t = (btn.innerText || '').trim();
+                        if (t === String({current_page})) {{
+                            const style = window.getComputedStyle(btn);
+                            const fw = parseInt(style.fontWeight) || 400;
+                            const isActive = fw >= 600 ||
+                                btn.classList.contains('active') ||
+                                btn.getAttribute('aria-current') === 'true' ||
+                                btn.getAttribute('aria-current') === 'page';
+                            if (isActive && i + 1 < smallBtns.length) {{
+                                const nextBtn = smallBtns[i + 1];
+                                const nextDisabled = nextBtn.disabled || nextBtn.getAttribute('aria-disabled') === 'true';
+                                if (!nextDisabled) {{
+                                    nextBtn.scrollIntoView({{block: 'center'}});
+                                    nextBtn.click();
+                                    return 'active_sibling';
                                 }}
                             }}
                         }}
