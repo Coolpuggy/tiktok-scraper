@@ -37,7 +37,6 @@ def extract_product_id(url):
 
 
 
-NUM_WORKERS = 3  # Number of parallel browser tabs for scraping
 
 
 def scrape_reviews_with_progress(job_id, product_url, max_pages=50):
@@ -207,33 +206,22 @@ def scrape_reviews_with_progress(job_id, product_url, max_pages=50):
             # Stop screenshot streaming
             job['_screenshot'] = None
 
-            # Scroll down to load the reviews section
+            # Scroll directly to reviews section (fast)
             job['message'] = 'Finding reviews section...'
-            for i in range(8):
-                page.evaluate(f"window.scrollTo(0, document.body.scrollHeight * {0.2 + i*0.1})")
-                page.wait_for_timeout(500)
-
-            # Try to scroll directly to the reviews/rating section
             page.evaluate("""() => {
-                // Look for review section headers or rating elements
-                const targets = [
-                    document.querySelector('[aria-label*="Rating:"][aria-label*="out of 5 stars"]'),
-                    document.querySelector('[class*="review"], [class*="Review"]'),
-                    document.querySelector('[id*="review"], [id*="Review"]'),
-                ];
-                for (const el of targets) {
-                    if (el) {
-                        el.scrollIntoView({block: 'start', behavior: 'smooth'});
-                        return;
-                    }
+                const el = document.querySelector('[aria-label*="Rating:"][aria-label*="out of 5 stars"]')
+                    || document.querySelector('[class*="review"], [class*="Review"]');
+                if (el) {
+                    el.scrollIntoView({block: 'start'});
+                    window.scrollBy(0, -100);
+                } else {
+                    window.scrollTo(0, document.body.scrollHeight * 0.6);
                 }
             }""")
-            page.wait_for_timeout(1500)
-
-            # Scroll a bit more to ensure pagination loads
-            for _ in range(5):
-                page.evaluate("window.scrollBy(0, 600)")
-                page.wait_for_timeout(300)
+            page.wait_for_timeout(500)
+            # One more scroll down to ensure pagination is visible
+            page.evaluate("window.scrollBy(0, 800)")
+            page.wait_for_timeout(500)
 
             # Extract product info
             product_info = page.evaluate("""() => {
@@ -408,54 +396,26 @@ def scrape_reviews_with_progress(job_id, product_url, max_pages=50):
                     return false;
                 }"""
 
-            # Helper: click specific page number
-            def click_page_js(target_page):
-                return f"""() => {{
-                    const pageDivs = document.querySelectorAll('div.cursor-pointer');
-                    for (const div of pageDivs) {{
-                        const text = div.innerText.trim();
-                        if (text === '{target_page}') {{
-                            const rect = div.getBoundingClientRect();
-                            if (rect.width > 0 && rect.width < 80 && rect.height > 0 && rect.height < 80) {{
-                                div.scrollIntoView({{block: 'center'}});
-                                div.click();
-                                return true;
-                            }}
-                        }}
-                    }}
-                    return false;
-                }}"""
-
-            # Helper: navigate to a specific page by clicking page numbers
-            def navigate_to_page(tab, target_page):
-                """Navigate a tab to a specific page number by repeated Next clicks."""
-                for attempt in range(target_page - 1):
-                    tab.evaluate(click_next_js())
-                    tab.wait_for_timeout(800)
 
             # Helper: scrape a range of pages using a given tab
             def scrape_page_range(tab, start_page, end_page, worker_id):
                 """Scrape pages start_page through end_page on given tab."""
                 worker_reviews = []
                 current = start_page
+                prev_first_review = ''
 
                 while current <= end_page:
-                    # Wait for ratings to appear
-                    for _ in range(4):
-                        rc = tab.evaluate("""() => document.querySelectorAll('[aria-label*="Rating:"][aria-label*="out of 5 stars"]').length""")
-                        if rc >= 2:
-                            break
-                        tab.wait_for_timeout(400)
-
                     # Extract reviews
                     page_reviews = tab.evaluate(extract_reviews_js())
-                    if isinstance(page_reviews, list):
+                    if isinstance(page_reviews, list) and len(page_reviews) > 0:
                         worker_reviews.extend(page_reviews)
+                        prev_first_review = page_reviews[0].get('review_text', '')[:30]
                     print(f"[{job_id}][W{worker_id}] Page {current}: {len(page_reviews) if isinstance(page_reviews, list) else 0} reviews")
 
-                    # Update job progress
+                    # Update job progress every page
                     job['current_page'] = max(job.get('current_page', 0), current)
-                    job['message'] = f'Scraping page {current}...'
+                    job['message'] = f'Page {current}/{max_pages} ({len(worker_reviews)} reviews)'
+                    job['progress'] = int((current / max_pages) * 100)
 
                     if current >= end_page:
                         break
@@ -466,93 +426,35 @@ def scrape_reviews_with_progress(job_id, product_url, max_pages=50):
                         print(f"[{job_id}][W{worker_id}] No Next button at page {current}")
                         break
 
-                    # Wait for new content (just 800ms - TikTok SPA is fast)
-                    tab.wait_for_timeout(800)
+                    # Wait for page transition (poll for active page number change)
+                    next_page = current + 1
+                    for _ in range(10):  # max 150ms * 10 = 1.5s timeout
+                        tab.wait_for_timeout(150)
+                        active = tab.evaluate("""() => {
+                            const divs = document.querySelectorAll('div.Headline-Semibold');
+                            for (const d of divs) {
+                                if (/^\\d+$/.test(d.innerText.trim()) && d.parentElement &&
+                                    d.parentElement.className.includes('UIText1')) {
+                                    return parseInt(d.innerText.trim());
+                                }
+                            }
+                            return 0;
+                        }""")
+                        if active >= next_page:
+                            break
+
                     current += 1
 
                 return worker_reviews
 
-            # Determine if we should use parallel workers
-            use_parallel = max_pages > 10 and NUM_WORKERS > 1
-
-            if not use_parallel:
-                # Single worker - simple sequential scraping
-                print(f"[{job_id}] Single worker mode for {max_pages} pages")
-                all_reviews = scrape_page_range(page, 1, max_pages, 0)
-                for r in all_reviews:
-                    key = r.get('review_text', '')[:50]
-                    if key and key not in seen_reviews:
-                        seen_reviews.add(key)
-                        reviews.append(r)
-            else:
-                # Parallel workers - split pages across multiple tabs
-                print(f"[{job_id}] Parallel mode: {NUM_WORKERS} workers for {max_pages} pages")
-
-                # Worker 1 uses the existing page (already on page 1)
-                # Other workers open new tabs and navigate to their start page
-                pages_per_worker = max_pages // NUM_WORKERS
-                worker_tabs = [page]  # First worker uses existing tab
-
-                # Create additional tabs
-                for w in range(1, NUM_WORKERS):
-                    try:
-                        new_tab = context.new_page()
-                        new_tab.goto(product_url, timeout=30000, wait_until='domcontentloaded')
-                        new_tab.wait_for_timeout(2000)
-                        # Scroll to reviews section
-                        for i in range(6):
-                            new_tab.evaluate(f"window.scrollTo(0, document.body.scrollHeight * {0.2 + i*0.1})")
-                            new_tab.wait_for_timeout(300)
-                        worker_tabs.append(new_tab)
-                        print(f"[{job_id}] Worker {w} tab created")
-                    except Exception as tab_err:
-                        print(f"[{job_id}] Failed to create worker {w} tab: {tab_err}")
-
-                num_workers = len(worker_tabs)
-                pages_per_worker = max_pages // num_workers
-
-                # Navigate each worker to its start page
-                for w in range(1, num_workers):
-                    start_page = w * pages_per_worker + 1
-                    print(f"[{job_id}] Worker {w} navigating to page {start_page}...")
-                    # Click the start page number directly if visible, otherwise use Next
-                    tab = worker_tabs[w]
-                    # Navigate by clicking page numbers or Next repeatedly
-                    target = start_page
-                    # Try clicking the page number directly first
-                    clicked = tab.evaluate(click_page_js(target))
-                    if not clicked:
-                        # Navigate sequentially with Next
-                        for p in range(target - 1):
-                            tab.evaluate(click_next_js())
-                            tab.wait_for_timeout(600)
-                    else:
-                        tab.wait_for_timeout(800)
-                    print(f"[{job_id}] Worker {w} ready at page {start_page}")
-
-                # Now run all workers (sequentially since Playwright is single-threaded)
-                for w in range(num_workers):
-                    start_page = w * pages_per_worker + 1
-                    end_page = (w + 1) * pages_per_worker if w < num_workers - 1 else max_pages
-                    print(f"[{job_id}] Worker {w}: pages {start_page}-{end_page}")
-
-                    worker_reviews = scrape_page_range(worker_tabs[w], start_page, end_page, w)
-                    for r in worker_reviews:
-                        key = r.get('review_text', '')[:50]
-                        if key and key not in seen_reviews:
-                            seen_reviews.add(key)
-                            reviews.append(r)
-
-                    job['reviews'] = reviews.copy()
-                    job['review_count'] = len(reviews)
-                    job['progress'] = int((end_page / max_pages) * 100)
-
-                # Close extra tabs
-                for w in range(1, num_workers):
-                    try:
-                        worker_tabs[w].close()
-                    except Exception:
-                        pass
+            # Single fast loop - parallel tabs don't help since Playwright is single-threaded
+            print(f"[{job_id}] Scraping {max_pages} pages...")
+            all_reviews = scrape_page_range(page, 1, max_pages, 0)
+            for r in all_reviews:
+                key = r.get('review_text', '')[:50]
+                if key and key not in seen_reviews:
+                    seen_reviews.add(key)
+                    reviews.append(r)
 
             job['reviews'] = reviews.copy()
             job['review_count'] = len(reviews)
