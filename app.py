@@ -1,15 +1,17 @@
 """
-TikTok Shop Review Scraper - Web Interface
-Flask app with Bright Data Scraping Browser (handles CAPTCHAs automatically)
+TikTok Shop Review Scraper - Manual CAPTCHA Flow
+Streams browser screenshots so users can solve CAPTCHAs manually,
+then auto-scrapes reviews once past the CAPTCHA.
 """
 
-from flask import Flask, render_template, request, jsonify, Response
+from flask import Flask, request, jsonify, Response
 from flask_cors import CORS
 import json
 import time
 import re
 import threading
 import os
+import base64
 from urllib.parse import urlparse
 
 app = Flask(__name__)
@@ -32,40 +34,28 @@ def extract_product_id(url):
     return None
 
 
-def get_scraping_browser_url():
-    """Get the Bright Data Scraping Browser WebSocket URL."""
-    # Option 1: Direct scraping browser URL
-    sb_url = os.environ.get('BRIGHT_DATA_SB_URL')
-    if sb_url:
-        return sb_url
-
-    # Option 2: Build from credentials
-    # Format: wss://brd-customer-CUSTOMER_ID-zone-ZONE:PASSWORD@brd.superproxy.io:9222
-    sb_auth = os.environ.get('BRIGHT_DATA_SB_AUTH')
-    if sb_auth:
-        # sb_auth format: brd-customer-XXX-zone-ZONE:PASSWORD
-        return f"wss://{sb_auth}@brd.superproxy.io:9222"
-
+def get_proxy_url():
+    """Get residential proxy URL from environment."""
+    proxy = os.environ.get('BRIGHT_DATA_PROXY')
+    if proxy:
+        # Format: user:pass@host:port
+        if not proxy.startswith('http'):
+            proxy = f"http://{proxy}"
+        return proxy
     return None
 
 
 def scrape_reviews_with_progress(job_id, product_url, max_pages=50):
-    """Scrape reviews using Bright Data Scraping Browser (handles CAPTCHAs)."""
+    """Scrape reviews with manual CAPTCHA solving via browser view."""
     job = scrape_jobs[job_id]
     job['status'] = 'starting'
-    job['message'] = 'Connecting to Scraping Browser...'
-
-    browser_ws_url = get_scraping_browser_url()
-    if not browser_ws_url:
-        job['status'] = 'error'
-        job['message'] = 'Scraping Browser not configured. Set BRIGHT_DATA_SB_URL or BRIGHT_DATA_SB_AUTH env var.'
-        return
+    job['message'] = 'Launching browser...'
 
     try:
         from playwright.sync_api import sync_playwright
     except ImportError:
         job['status'] = 'error'
-        job['message'] = 'Playwright not installed. Run: pip install playwright'
+        job['message'] = 'Playwright not installed.'
         return
 
     reviews = []
@@ -73,44 +63,138 @@ def scrape_reviews_with_progress(job_id, product_url, max_pages=50):
 
     try:
         with sync_playwright() as p:
-            print(f"[{job_id}] Connecting to Scraping Browser...")
-            job['message'] = 'Connecting to remote browser...'
+            print(f"[{job_id}] Launching local browser...")
 
-            # Connect to Bright Data's Scraping Browser via CDP
-            browser = p.chromium.connect_over_cdp(browser_ws_url)
-            print(f"[{job_id}] Connected to Scraping Browser")
+            launch_args = [
+                '--no-sandbox',
+                '--disable-setuid-sandbox',
+                '--disable-dev-shm-usage',
+                '--disable-blink-features=AutomationControlled',
+            ]
 
-            context = browser.contexts[0] if browser.contexts else browser.new_context()
+            proxy_url = get_proxy_url()
+            proxy_config = None
+            if proxy_url:
+                proxy_config = {"server": proxy_url}
+                print(f"[{job_id}] Using residential proxy")
+
+            browser = p.chromium.launch(
+                headless=True,
+                args=launch_args,
+            )
+
+            context = browser.new_context(
+                viewport={"width": 1280, "height": 800},
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                proxy=proxy_config,
+            )
+
             page = context.new_page()
-
-            # Set viewport
-            page.set_viewport_size({"width": 1920, "height": 1080})
+            job['_page'] = page
+            job['_browser'] = browser
 
             # Navigate to product page
-            job['status'] = 'loading'
-            job['message'] = 'Loading product page (may solve CAPTCHA)...'
-            print(f"[{job_id}] Loading URL: {product_url}")
+            job['status'] = 'captcha'
+            job['message'] = 'Loading page - please solve CAPTCHA if shown...'
+            print(f"[{job_id}] Navigating to: {product_url}")
 
-            page.goto(product_url, timeout=120000, wait_until='domcontentloaded')
+            page.goto(product_url, timeout=60000, wait_until='domcontentloaded')
+            page.wait_for_timeout(2000)
 
-            # Wait for page to fully load - Scraping Browser handles CAPTCHAs automatically
-            # Give it extra time for CAPTCHA solving
-            page.wait_for_timeout(10000)
+            # Take initial screenshot
+            screenshot = page.screenshot(type='jpeg', quality=60)
+            job['_screenshot'] = base64.b64encode(screenshot).decode('utf-8')
+            job['_screenshot_updated'] = time.time()
 
-            # Check if we're past the CAPTCHA
-            page_title = page.title()
-            print(f"[{job_id}] Page title: '{page_title}'")
+            # Start screenshot streaming in background
+            def update_screenshots():
+                while job.get('status') in ('captcha', 'loading'):
+                    try:
+                        if job.get('_page') and not job.get('_browser_closed'):
+                            ss = page.screenshot(type='jpeg', quality=50)
+                            job['_screenshot'] = base64.b64encode(ss).decode('utf-8')
+                            job['_screenshot_updated'] = time.time()
+                    except Exception:
+                        break
+                    time.sleep(0.3)
 
-            # If still on security check, wait longer
-            if 'security' in page_title.lower() or 'verify' in page_title.lower():
-                print(f"[{job_id}] CAPTCHA detected, waiting for auto-solve...")
-                job['message'] = 'Solving CAPTCHA...'
-                page.wait_for_timeout(30000)
-                page_title = page.title()
-                print(f"[{job_id}] After wait - title: '{page_title}'")
+            ss_thread = threading.Thread(target=update_screenshots, daemon=True)
+            ss_thread.start()
+
+            # Wait for CAPTCHA to be solved (check for review elements or page content)
+            # We give the user up to 3 minutes to solve it
+            captcha_timeout = 180  # seconds
+            start_wait = time.time()
+            captcha_solved = False
+
+            while time.time() - start_wait < captcha_timeout:
+                if job.get('status') == 'error':
+                    break
+
+                # Check if page has reviews or product content (CAPTCHA solved)
+                try:
+                    has_content = page.evaluate("""() => {
+                        // Check for rating elements (reviews section)
+                        const ratings = document.querySelectorAll('[aria-label*="Rating:"][aria-label*="out of 5 stars"]');
+                        if (ratings.length > 0) return 'reviews';
+
+                        // Check for product title (at minimum we're past CAPTCHA)
+                        const h1 = document.querySelector('h1');
+                        if (h1 && h1.innerText.trim().length > 5) {
+                            // Make sure it's not a CAPTCHA page title
+                            const title = document.title.toLowerCase();
+                            if (!title.includes('security') && !title.includes('verify') && !title.includes('captcha')) {
+                                return 'product';
+                            }
+                        }
+                        return null;
+                    }""")
+
+                    if has_content:
+                        captcha_solved = True
+                        print(f"[{job_id}] CAPTCHA solved! Found: {has_content}")
+                        break
+                except Exception:
+                    pass
+
+                time.sleep(1)
+
+            if not captcha_solved:
+                job['status'] = 'error'
+                job['message'] = 'CAPTCHA was not solved in time. Please try again.'
+                try:
+                    browser.close()
+                except Exception:
+                    pass
+                job['_browser_closed'] = True
+                return
+
+            # CAPTCHA solved - proceed with scraping
+            job['status'] = 'scraping'
+            job['message'] = 'CAPTCHA solved! Scraping reviews...'
+            print(f"[{job_id}] Starting review extraction...")
+
+            # Stop screenshot streaming
+            job['_screenshot'] = None
+
+            # Scroll to reviews section
+            job['message'] = 'Finding reviews section...'
+            for i in range(5):
+                page.evaluate(f"window.scrollTo(0, document.body.scrollHeight * {0.3 + i*0.15})")
+                page.wait_for_timeout(400)
+
+            page.evaluate("""() => {
+                const ratingEl = document.querySelector('[aria-label*="Rating:"][aria-label*="out of 5 stars"]');
+                if (ratingEl) ratingEl.scrollIntoView({block: 'center', behavior: 'smooth'});
+            }""")
+            page.wait_for_timeout(1000)
+
+            # Scroll more to load pagination
+            for _ in range(10):
+                page.evaluate("window.scrollBy(0, 800)")
+                page.wait_for_timeout(200)
 
             # Extract product info
-            job['message'] = 'Extracting product info...'
             product_info = page.evaluate("""() => {
                 let title = '';
                 let image = '';
@@ -137,33 +221,14 @@ def scrape_reviews_with_progress(job_id, product_url, max_pages=50):
                     }
                 }
 
-                return {title: title, image: image};
+                return {title, image};
             }""")
 
             job['product_title'] = product_info.get('title', '')
             job['product_image'] = product_info.get('image', '')
             print(f"[{job_id}] Product: {job['product_title'][:50]}")
 
-            # Scroll to reviews section
-            job['message'] = 'Finding reviews section...'
-            for i in range(5):
-                page.evaluate(f"window.scrollTo(0, document.body.scrollHeight * {0.3 + i*0.15})")
-                page.wait_for_timeout(400)
-
-            page.evaluate("""() => {
-                const ratingEl = document.querySelector('[aria-label*="Rating:"][aria-label*="out of 5 stars"]');
-                if (ratingEl) ratingEl.scrollIntoView({block: 'center', behavior: 'smooth'});
-            }""")
-            page.wait_for_timeout(1000)
-
-            # Scroll more to load pagination
-            for _ in range(10):
-                page.evaluate("window.scrollBy(0, 800)")
-                page.wait_for_timeout(200)
-
-            job['status'] = 'scraping'
             current_page = 1
-            print(f"[{job_id}] Starting to scrape reviews...")
 
             while current_page <= max_pages:
                 job['current_page'] = current_page
@@ -171,7 +236,7 @@ def scrape_reviews_with_progress(job_id, product_url, max_pages=50):
                 job['message'] = f'Scraping page {current_page}...'
                 job['progress'] = int((current_page / max_pages) * 100)
 
-                # Extract reviews
+                # Extract reviews from current page
                 review_data = page.evaluate("""() => {
                     const reviews = [];
                     const ratingElements = document.querySelectorAll('[aria-label*="Rating:"][aria-label*="out of 5 stars"]');
@@ -243,10 +308,10 @@ def scrape_reviews_with_progress(job_id, product_url, max_pages=50):
 
                             if (reviewText.length > 10) {
                                 reviews.push({
-                                    username: username,
-                                    rating: rating,
+                                    username,
+                                    rating,
                                     review_text: reviewText,
-                                    date: date,
+                                    date,
                                     item_variant: itemVariant
                                 });
                             }
@@ -358,8 +423,8 @@ def scrape_reviews_with_progress(job_id, product_url, max_pages=50):
             job['message'] = f'Done! Found {len(reviews)} reviews'
             job['progress'] = 100
 
-            # Close browser
             browser.close()
+            job['_browser_closed'] = True
 
     except Exception as e:
         print(f"[{job_id}] ERROR: {str(e)}")
@@ -367,11 +432,7 @@ def scrape_reviews_with_progress(job_id, product_url, max_pages=50):
         traceback.print_exc()
         job['status'] = 'error'
         job['message'] = f'Error: {str(e)}'
-
-
-@app.route('/')
-def index():
-    return render_template('index.html')
+        job['_browser_closed'] = True
 
 
 @app.route('/start', methods=['POST'])
@@ -396,7 +457,8 @@ def start_scrape():
         'current_page': 0,
         'max_pages': max_pages,
         'reviews': [],
-        'review_count': 0
+        'review_count': 0,
+        '_browser_closed': False,
     }
 
     # Start scraping in background thread
@@ -425,13 +487,98 @@ def get_status(job_id):
         'review_count': job.get('review_count', 0),
         'reviews': job.get('reviews', []) if job['status'] == 'complete' else [],
         'product_title': job.get('product_title', ''),
-        'product_image': job.get('product_image', '')
+        'product_image': job.get('product_image', ''),
+        'has_screenshot': bool(job.get('_screenshot')),
     })
+
+
+@app.route('/browser-stream/<job_id>')
+def browser_stream(job_id):
+    """SSE endpoint that streams browser screenshots as base64 JPEG."""
+    if job_id not in scrape_jobs:
+        return jsonify({'error': 'Job not found'}), 404
+
+    def generate():
+        last_sent = 0
+        while True:
+            if job_id not in scrape_jobs:
+                yield f"data: {json.dumps({'type': 'done'})}\n\n"
+                break
+
+            job = scrape_jobs[job_id]
+
+            # If no longer in captcha state, send done
+            if job['status'] not in ('captcha', 'loading', 'starting'):
+                yield f"data: {json.dumps({'type': 'solved', 'status': job['status']})}\n\n"
+                break
+
+            # Send screenshot if updated
+            screenshot = job.get('_screenshot')
+            updated = job.get('_screenshot_updated', 0)
+
+            if screenshot and updated > last_sent:
+                yield f"data: {json.dumps({'type': 'frame', 'image': screenshot})}\n\n"
+                last_sent = updated
+
+            time.sleep(0.3)
+
+    return Response(generate(), mimetype='text/event-stream',
+                    headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
+
+
+@app.route('/browser-event/<job_id>', methods=['POST'])
+def browser_event(job_id):
+    """Receive mouse/keyboard events from frontend and forward to browser."""
+    if job_id not in scrape_jobs:
+        return jsonify({'error': 'Job not found'}), 404
+
+    job = scrape_jobs[job_id]
+    page = job.get('_page')
+
+    if not page or job.get('_browser_closed'):
+        return jsonify({'error': 'Browser not available'}), 400
+
+    data = request.json
+    event_type = data.get('type')
+
+    try:
+        if event_type == 'click':
+            x = data.get('x', 0)
+            y = data.get('y', 0)
+            page.mouse.click(x, y)
+        elif event_type == 'mousemove':
+            x = data.get('x', 0)
+            y = data.get('y', 0)
+            page.mouse.move(x, y)
+        elif event_type == 'mousedown':
+            x = data.get('x', 0)
+            y = data.get('y', 0)
+            page.mouse.move(x, y)
+            page.mouse.down()
+        elif event_type == 'mouseup':
+            x = data.get('x', 0)
+            y = data.get('y', 0)
+            page.mouse.move(x, y)
+            page.mouse.up()
+        elif event_type == 'scroll':
+            x = data.get('x', 0)
+            y = data.get('y', 0)
+            delta_x = data.get('deltaX', 0)
+            delta_y = data.get('deltaY', 0)
+            page.mouse.wheel(delta_x, delta_y)
+        elif event_type == 'keydown':
+            key = data.get('key', '')
+            if key:
+                page.keyboard.press(key)
+
+        return jsonify({'ok': True})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 
 @app.route('/stream/<job_id>')
 def stream_status(job_id):
-    """Server-Sent Events for real-time progress."""
+    """Server-Sent Events for real-time progress (non-screenshot data)."""
     def generate():
         while True:
             if job_id not in scrape_jobs:
@@ -458,15 +605,16 @@ def stream_status(job_id):
             yield f"data: {json.dumps(data)}\n\n"
             time.sleep(0.5)
 
-    return Response(generate(), mimetype='text/event-stream')
+    return Response(generate(), mimetype='text/event-stream',
+                    headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
 
 
 @app.route('/health')
 def health():
-    """Health check endpoint for Railway."""
+    """Health check endpoint."""
     return jsonify({
         'status': 'ok',
-        'scraping_browser_configured': bool(get_scraping_browser_url())
+        'proxy_configured': bool(get_proxy_url()),
     })
 
 
