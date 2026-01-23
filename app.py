@@ -69,17 +69,20 @@ def scrape_reviews_with_progress(job_id, product_url, max_pages=50):
     use_wire = False
     seleniumwire_options = None
     if proxy_url:
+        # Switch to port 22225 (standard HTTP CONNECT port) if using 33335
+        proxy_url_adjusted = proxy_url.replace(':33335', ':22225')
         seleniumwire_options = {
             'proxy': {
-                'http': f'http://{proxy_url}',
-                'https': f'http://{proxy_url}',
+                'http': f'http://{proxy_url_adjusted}',
+                'https': f'http://{proxy_url_adjusted}',
                 'no_proxy': 'localhost,127.0.0.1'
             },
             'suppress_connection_errors': False,
             'verify_ssl': False,
+            'disable_capture': True,  # Don't intercept/decrypt - just forward
         }
         use_wire = True
-        host_part = proxy_url.split('@')[-1] if '@' in proxy_url else proxy_url
+        host_part = proxy_url_adjusted.split('@')[-1] if '@' in proxy_url_adjusted else proxy_url_adjusted
         print(f"[{job_id}] Using residential proxy via selenium-wire: {host_part}")
     else:
         print(f"[{job_id}] No proxy configured (set BRIGHT_DATA_PROXY env var)")
