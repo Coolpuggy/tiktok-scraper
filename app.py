@@ -402,20 +402,24 @@ def scrape_reviews_with_progress(job_id, product_url, max_pages=50):
                 """Scrape pages start_page through end_page on given tab."""
                 worker_reviews = []
                 current = start_page
-                prev_first_review = ''
 
                 while current <= end_page:
                     # Extract reviews
                     page_reviews = tab.evaluate(extract_reviews_js())
                     if isinstance(page_reviews, list) and len(page_reviews) > 0:
-                        worker_reviews.extend(page_reviews)
-                        prev_first_review = page_reviews[0].get('review_text', '')[:30]
-                    print(f"[{job_id}][W{worker_id}] Page {current}: {len(page_reviews) if isinstance(page_reviews, list) else 0} reviews")
+                        # Dedup as we go using review_text + username
+                        for r in page_reviews:
+                            key = (r.get('username', '') + '|' + r.get('review_text', '')).strip()
+                            if key and key not in seen_reviews:
+                                seen_reviews.add(key)
+                                worker_reviews.append(r)
+                    print(f"[{job_id}][W{worker_id}] Page {current}: {len(page_reviews) if isinstance(page_reviews, list) else 0} raw, {len(worker_reviews)} unique total")
 
                     # Update job progress every page
                     job['current_page'] = max(job.get('current_page', 0), current)
-                    job['message'] = f'Page {current}/{max_pages} ({len(worker_reviews)} reviews)'
+                    job['message'] = f'Scraping page {current}...'
                     job['progress'] = int((current / max_pages) * 100)
+                    job['review_count'] = len(worker_reviews)
 
                     if current >= end_page:
                         break
@@ -426,37 +430,17 @@ def scrape_reviews_with_progress(job_id, product_url, max_pages=50):
                         print(f"[{job_id}][W{worker_id}] No Next button at page {current}")
                         break
 
-                    # Wait for page transition (poll for active page number change)
-                    next_page = current + 1
-                    for _ in range(10):  # max 150ms * 10 = 1.5s timeout
-                        tab.wait_for_timeout(150)
-                        active = tab.evaluate("""() => {
-                            const divs = document.querySelectorAll('div.Headline-Semibold');
-                            for (const d of divs) {
-                                if (/^\\d+$/.test(d.innerText.trim()) && d.parentElement &&
-                                    d.parentElement.className.includes('UIText1')) {
-                                    return parseInt(d.innerText.trim());
-                                }
-                            }
-                            return 0;
-                        }""")
-                        if active >= next_page:
-                            break
-
+                    # Wait for page content to change (500ms fixed - reliable and fast)
+                    tab.wait_for_timeout(500)
                     current += 1
 
                 return worker_reviews
 
-            # Single fast loop - parallel tabs don't help since Playwright is single-threaded
+            # Single fast loop
             print(f"[{job_id}] Scraping {max_pages} pages...")
-            all_reviews = scrape_page_range(page, 1, max_pages, 0)
-            for r in all_reviews:
-                key = r.get('review_text', '')[:50]
-                if key and key not in seen_reviews:
-                    seen_reviews.add(key)
-                    reviews.append(r)
+            reviews = scrape_page_range(page, 1, max_pages, 0)
 
-            job['reviews'] = reviews.copy()
+            job['reviews'] = reviews
             job['review_count'] = len(reviews)
 
             job['status'] = 'complete'
