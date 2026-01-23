@@ -76,17 +76,17 @@ def scrape_reviews_with_progress(job_id, product_url, max_pages=50):
             proxy_config = None
             if proxy_url:
                 proxy_config = {"server": proxy_url}
-                print(f"[{job_id}] Using residential proxy")
+                print(f"[{job_id}] Using residential proxy: {proxy_url.split('@')[-1] if '@' in proxy_url else proxy_url}")
 
             browser = p.chromium.launch(
                 headless=True,
                 args=launch_args,
+                proxy=proxy_config,
             )
 
             context = browser.new_context(
                 viewport={"width": 1280, "height": 800},
                 user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                proxy=proxy_config,
             )
 
             page = context.new_page()
@@ -98,28 +98,31 @@ def scrape_reviews_with_progress(job_id, product_url, max_pages=50):
             job['message'] = 'Loading page - please solve CAPTCHA if shown...'
             print(f"[{job_id}] Navigating to: {product_url}")
 
-            page.goto(product_url, timeout=60000, wait_until='domcontentloaded')
-            page.wait_for_timeout(2000)
-
-            # Take initial screenshot
-            screenshot = page.screenshot(type='jpeg', quality=60)
-            job['_screenshot'] = base64.b64encode(screenshot).decode('utf-8')
-            job['_screenshot_updated'] = time.time()
-
-            # Start screenshot streaming in background
+            # Start screenshot streaming in background (starts even during page load)
             def update_screenshots():
-                while job.get('status') in ('captcha', 'loading'):
+                while job.get('status') in ('captcha', 'starting', 'loading'):
                     try:
                         if job.get('_page') and not job.get('_browser_closed'):
                             ss = page.screenshot(type='jpeg', quality=50)
                             job['_screenshot'] = base64.b64encode(ss).decode('utf-8')
                             job['_screenshot_updated'] = time.time()
-                    except Exception:
-                        break
+                    except Exception as ss_err:
+                        print(f"[{job_id}] Screenshot error: {ss_err}")
+                        time.sleep(1)
+                        continue
                     time.sleep(0.3)
 
             ss_thread = threading.Thread(target=update_screenshots, daemon=True)
             ss_thread.start()
+
+            try:
+                page.goto(product_url, timeout=60000, wait_until='domcontentloaded')
+            except Exception as nav_err:
+                print(f"[{job_id}] Navigation error (may be proxy issue): {nav_err}")
+                # Even if goto times out, the page might have partially loaded
+                # Continue and let the user interact
+
+            page.wait_for_timeout(2000)
 
             # Wait for CAPTCHA to be solved (check for review elements or page content)
             # We give the user up to 3 minutes to solve it
