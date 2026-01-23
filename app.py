@@ -319,6 +319,15 @@ def scrape_reviews_with_progress(job_id, product_url, max_pages=50):
                 job['message'] = f'Scraping page {current_page}...'
                 job['progress'] = int((current_page / max_pages) * 100)
 
+                # Wait for reviews to be present on the page
+                for wait_try in range(6):  # up to 3 seconds
+                    rc = page.evaluate("""() => {
+                        return document.querySelectorAll('[aria-label*="Rating:"][aria-label*="out of 5 stars"]').length;
+                    }""")
+                    if rc >= 2:
+                        break
+                    page.wait_for_timeout(500)
+
                 # Extract reviews from current page
                 review_data = page.evaluate("""() => {
                     const reviews = [];
@@ -656,7 +665,21 @@ def scrape_reviews_with_progress(job_id, product_url, max_pages=50):
 
                 if clicked:
                     print(f"[{job_id}] Pagination click: {clicked} -> page {current_page + 1}")
-                    page.wait_for_timeout(2000)
+                    # Wait for new reviews to load - check until rating elements appear
+                    # or timeout after 5 seconds
+                    page.wait_for_timeout(1000)  # initial wait
+                    for wait_attempt in range(8):  # up to 4 more seconds
+                        rating_count = page.evaluate("""() => {
+                            return document.querySelectorAll('[aria-label*="Rating:"][aria-label*="out of 5 stars"]').length;
+                        }""")
+                        if rating_count >= 3:
+                            print(f"[{job_id}] Page loaded: {rating_count} rating elements found")
+                            break
+                        page.wait_for_timeout(500)
+                    else:
+                        print(f"[{job_id}] Timeout waiting for reviews, proceeding anyway")
+                    # Extra wait for full render
+                    page.wait_for_timeout(1000)
                     current_page += 1
                 else:
                     print(f"[{job_id}] No pagination found after page {current_page}")
