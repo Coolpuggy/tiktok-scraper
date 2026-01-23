@@ -98,13 +98,14 @@ def scrape_reviews_with_progress(job_id, product_url, max_pages=50):
         upstream_port = int(upstream_port)
 
         def run_local_proxy(listen_port, up_host, up_port, auth_hdr):
-            """Simple forwarding proxy that adds auth to upstream."""
+            """Simple forwarding proxy that adds auth to upstream CONNECT."""
             import socketserver
 
             class ProxyHandler(socketserver.BaseRequestHandler):
                 def handle(self):
+                    upstream = None
                     try:
-                        # Read the initial request from Chrome
+                        # Read Chrome's CONNECT request
                         data = b''
                         while b'\r\n\r\n' not in data:
                             chunk = self.request.recv(4096)
@@ -112,28 +113,60 @@ def scrape_reviews_with_progress(job_id, product_url, max_pages=50):
                                 return
                             data += chunk
 
-                        # Parse and inject auth header
                         header_end = data.index(b'\r\n\r\n')
-                        headers = data[:header_end].decode('utf-8', errors='replace')
-                        body = data[header_end + 4:]
+                        request_line = data[:data.index(b'\r\n')].decode()
 
-                        # Insert auth header after first line
-                        lines = headers.split('\r\n')
-                        lines.insert(1, auth_hdr.rstrip('\r\n'))
-                        modified = '\r\n'.join(lines) + '\r\n\r\n'
-
-                        # Connect to upstream proxy
+                        # Connect to upstream Bright Data proxy
                         upstream = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                        upstream.settimeout(30)
+                        upstream.settimeout(60)
                         upstream.connect((up_host, up_port))
-                        upstream.sendall(modified.encode() + body)
+
+                        if request_line.startswith('CONNECT'):
+                            # HTTPS tunnel request
+                            # Forward CONNECT with auth header to upstream
+                            target = request_line.split(' ')[1]
+                            connect_req = (
+                                f'CONNECT {target} HTTP/1.1\r\n'
+                                f'Host: {target}\r\n'
+                                f'{auth_hdr}'
+                                f'\r\n'
+                            )
+                            upstream.sendall(connect_req.encode())
+
+                            # Read upstream's response to CONNECT
+                            resp = b''
+                            while b'\r\n\r\n' not in resp:
+                                chunk = upstream.recv(4096)
+                                if not chunk:
+                                    return
+                                resp += chunk
+
+                            # Check if upstream accepted
+                            status_line = resp[:resp.index(b'\r\n')].decode()
+                            if '200' in status_line:
+                                # Tell Chrome the tunnel is established
+                                self.request.sendall(b'HTTP/1.1 200 Connection established\r\n\r\n')
+                            else:
+                                # Forward error to Chrome
+                                self.request.sendall(resp)
+                                return
+                        else:
+                            # Regular HTTP request - inject auth and forward
+                            headers = data[:header_end].decode('utf-8', errors='replace')
+                            body = data[header_end + 4:]
+                            lines = headers.split('\r\n')
+                            lines.insert(1, auth_hdr.rstrip('\r\n'))
+                            modified = '\r\n'.join(lines) + '\r\n\r\n'
+                            upstream.sendall(modified.encode() + body)
 
                         # Bidirectional forwarding
                         self.request.setblocking(False)
                         upstream.setblocking(False)
 
                         while True:
-                            readable, _, _ = select.select([self.request, upstream], [], [], 30)
+                            readable, _, _ = select.select(
+                                [self.request, upstream], [], [], 60
+                            )
                             if not readable:
                                 break
                             for s in readable:
@@ -151,7 +184,8 @@ def scrape_reviews_with_progress(job_id, product_url, max_pages=50):
                         print(f"[proxy] Error: {e}")
                     finally:
                         try:
-                            self.request.close()
+                            if upstream:
+                                upstream.close()
                         except:
                             pass
 
