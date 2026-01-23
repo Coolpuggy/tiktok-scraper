@@ -66,24 +66,113 @@ def scrape_reviews_with_progress(job_id, product_url, max_pages=50):
     # Configure residential proxy if available (Bright Data format)
     # BRIGHT_DATA_PROXY format: username:password@host:port
     proxy_url = os.environ.get('BRIGHT_DATA_PROXY')
-    use_wire = False
-    seleniumwire_options = None
+    local_proxy_port = None
     if proxy_url:
-        # Switch to port 22225 (standard HTTP CONNECT port) if using 33335
-        proxy_url_adjusted = proxy_url.replace(':33335', ':22225')
-        seleniumwire_options = {
-            'proxy': {
-                'http': f'http://{proxy_url_adjusted}',
-                'https': f'http://{proxy_url_adjusted}',
-                'no_proxy': 'localhost,127.0.0.1'
-            },
-            'suppress_connection_errors': False,
-            'verify_ssl': False,
-            'disable_capture': True,  # Don't intercept/decrypt - just forward
-        }
-        use_wire = True
-        host_part = proxy_url_adjusted.split('@')[-1] if '@' in proxy_url_adjusted else proxy_url_adjusted
-        print(f"[{job_id}] Using residential proxy via selenium-wire: {host_part}")
+        # Parse proxy URL
+        if '@' in proxy_url:
+            creds_part, host_part = proxy_url.rsplit('@', 1)
+        else:
+            creds_part, host_part = None, proxy_url
+
+        # Use port 22225 for CONNECT support
+        host_part = host_part.replace(':33335', ':22225')
+
+        # Start a local forwarding proxy that adds auth headers
+        import socket
+        import select
+        import base64
+
+        # Find a free port
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.bind(('127.0.0.1', 0))
+        local_proxy_port = sock.getsockname()[1]
+        sock.close()
+
+        # Build auth header
+        auth_header = ''
+        if creds_part:
+            auth_b64 = base64.b64encode(creds_part.encode()).decode()
+            auth_header = f'Proxy-Authorization: Basic {auth_b64}\r\n'
+
+        upstream_host, upstream_port = host_part.split(':')
+        upstream_port = int(upstream_port)
+
+        def run_local_proxy(listen_port, up_host, up_port, auth_hdr):
+            """Simple forwarding proxy that adds auth to upstream."""
+            import socketserver
+
+            class ProxyHandler(socketserver.BaseRequestHandler):
+                def handle(self):
+                    try:
+                        # Read the initial request from Chrome
+                        data = b''
+                        while b'\r\n\r\n' not in data:
+                            chunk = self.request.recv(4096)
+                            if not chunk:
+                                return
+                            data += chunk
+
+                        # Parse and inject auth header
+                        header_end = data.index(b'\r\n\r\n')
+                        headers = data[:header_end].decode('utf-8', errors='replace')
+                        body = data[header_end + 4:]
+
+                        # Insert auth header after first line
+                        lines = headers.split('\r\n')
+                        lines.insert(1, auth_hdr.rstrip('\r\n'))
+                        modified = '\r\n'.join(lines) + '\r\n\r\n'
+
+                        # Connect to upstream proxy
+                        upstream = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                        upstream.settimeout(30)
+                        upstream.connect((up_host, up_port))
+                        upstream.sendall(modified.encode() + body)
+
+                        # Bidirectional forwarding
+                        self.request.setblocking(False)
+                        upstream.setblocking(False)
+
+                        while True:
+                            readable, _, _ = select.select([self.request, upstream], [], [], 30)
+                            if not readable:
+                                break
+                            for s in readable:
+                                try:
+                                    chunk = s.recv(65536)
+                                    if not chunk:
+                                        return
+                                    if s is self.request:
+                                        upstream.sendall(chunk)
+                                    else:
+                                        self.request.sendall(chunk)
+                                except (ConnectionError, OSError):
+                                    return
+                    except Exception as e:
+                        print(f"[proxy] Error: {e}")
+                    finally:
+                        try:
+                            self.request.close()
+                        except:
+                            pass
+
+            class ThreadedServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
+                allow_reuse_address = True
+                daemon_threads = True
+
+            server = ThreadedServer(('127.0.0.1', listen_port), ProxyHandler)
+            server.serve_forever()
+
+        # Start local proxy in background thread
+        proxy_thread = threading.Thread(
+            target=run_local_proxy,
+            args=(local_proxy_port, upstream_host, upstream_port, auth_header),
+            daemon=True
+        )
+        proxy_thread.start()
+        time.sleep(0.5)  # Let it start
+
+        chrome_options.add_argument(f"--proxy-server=http://127.0.0.1:{local_proxy_port}")
+        print(f"[{job_id}] Local proxy on :{local_proxy_port} -> {host_part}")
     else:
         print(f"[{job_id}] No proxy configured (set BRIGHT_DATA_PROXY env var)")
 
@@ -93,26 +182,11 @@ def scrape_reviews_with_progress(job_id, product_url, max_pages=50):
         chrome_options.binary_location = chrome_bin
 
     try:
-        if use_wire:
-            from seleniumwire import webdriver as wire_webdriver
-            try:
-                driver = wire_webdriver.Chrome(
-                    options=chrome_options,
-                    seleniumwire_options=seleniumwire_options
-                )
-            except Exception:
-                service = Service(ChromeDriverManager().install())
-                driver = wire_webdriver.Chrome(
-                    service=service,
-                    options=chrome_options,
-                    seleniumwire_options=seleniumwire_options
-                )
-        else:
-            try:
-                driver = webdriver.Chrome(options=chrome_options)
-            except Exception:
-                service = Service(ChromeDriverManager().install())
-                driver = webdriver.Chrome(service=service, options=chrome_options)
+        try:
+            driver = webdriver.Chrome(options=chrome_options)
+        except Exception:
+            service = Service(ChromeDriverManager().install())
+            driver = webdriver.Chrome(service=service, options=chrome_options)
 
         driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
     except Exception as e:
