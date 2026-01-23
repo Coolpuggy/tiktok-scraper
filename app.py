@@ -156,15 +156,24 @@ def scrape_reviews_with_progress(job_id, product_url, max_pages=50):
                         const ratings = document.querySelectorAll('[aria-label*="Rating:"][aria-label*="out of 5 stars"]');
                         if (ratings.length > 0) return 'reviews';
 
-                        // Check for product title (at minimum we're past CAPTCHA)
+                        // Check for any rating-like elements (TikTok may change aria labels)
+                        const stars = document.querySelectorAll('[aria-label*="Rating"]');
+                        if (stars.length >= 3) return 'ratings';
+
+                        // Check for product title/price (we're past CAPTCHA)
                         const h1 = document.querySelector('h1');
-                        if (h1 && h1.innerText.trim().length > 5) {
-                            // Make sure it's not a CAPTCHA page title
+                        const hasPrice = document.querySelector('[class*="price"], [class*="Price"]');
+                        if (h1 && h1.innerText.trim().length > 5 && hasPrice) {
                             const title = document.title.toLowerCase();
                             if (!title.includes('security') && !title.includes('verify') && !title.includes('captcha')) {
                                 return 'product';
                             }
                         }
+
+                        // Check for add-to-cart button (definitely past CAPTCHA)
+                        const addToCart = document.querySelector('[class*="AddToCart"], [class*="add-to-cart"], button[aria-label*="Add to cart"]');
+                        if (addToCart) return 'product';
+
                         return null;
                     }""")
 
@@ -195,22 +204,33 @@ def scrape_reviews_with_progress(job_id, product_url, max_pages=50):
             # Stop screenshot streaming
             job['_screenshot'] = None
 
-            # Scroll to reviews section
+            # Scroll down to load the reviews section
             job['message'] = 'Finding reviews section...'
-            for i in range(5):
-                page.evaluate(f"window.scrollTo(0, document.body.scrollHeight * {0.3 + i*0.15})")
-                page.wait_for_timeout(400)
+            for i in range(8):
+                page.evaluate(f"window.scrollTo(0, document.body.scrollHeight * {0.2 + i*0.1})")
+                page.wait_for_timeout(500)
 
+            # Try to scroll directly to the reviews/rating section
             page.evaluate("""() => {
-                const ratingEl = document.querySelector('[aria-label*="Rating:"][aria-label*="out of 5 stars"]');
-                if (ratingEl) ratingEl.scrollIntoView({block: 'center', behavior: 'smooth'});
+                // Look for review section headers or rating elements
+                const targets = [
+                    document.querySelector('[aria-label*="Rating:"][aria-label*="out of 5 stars"]'),
+                    document.querySelector('[class*="review"], [class*="Review"]'),
+                    document.querySelector('[id*="review"], [id*="Review"]'),
+                ];
+                for (const el of targets) {
+                    if (el) {
+                        el.scrollIntoView({block: 'start', behavior: 'smooth'});
+                        return;
+                    }
+                }
             }""")
-            page.wait_for_timeout(1000)
+            page.wait_for_timeout(1500)
 
-            # Scroll more to load pagination
-            for _ in range(10):
-                page.evaluate("window.scrollBy(0, 800)")
-                page.wait_for_timeout(200)
+            # Scroll a bit more to ensure pagination loads
+            for _ in range(5):
+                page.evaluate("window.scrollBy(0, 600)")
+                page.wait_for_timeout(300)
 
             # Extract product info
             product_info = page.evaluate("""() => {
@@ -302,88 +322,121 @@ def scrape_reviews_with_progress(job_id, product_url, max_pages=50):
                 # Extract reviews from current page
                 review_data = page.evaluate("""() => {
                     const reviews = [];
-                    const debug = {found_ratings: 0, skipped_no_container: 0, skipped_no_username: 0, skipped_short_text: 0};
+                    const debug = {found_ratings: 0, extracted: 0, method: ''};
+
+                    // Method 1: Find rating elements with aria-label
                     const ratingElements = document.querySelectorAll('[aria-label*="Rating:"][aria-label*="out of 5 stars"]');
                     debug.found_ratings = ratingElements.length;
 
                     ratingElements.forEach(ratingEl => {
                         try {
                             const ariaLabel = ratingEl.getAttribute('aria-label');
-                            const ratingMatch = ariaLabel.match(/Rating:\\s*(\\d+)\\s*out of 5/);
-                            const rating = ratingMatch ? parseInt(ratingMatch[1]) : 0;
+                            const ratingMatch = ariaLabel.match(/Rating:\\s*(\\d+(?:\\.\\d+)?)\\s*out of 5/);
+                            const rating = ratingMatch ? Math.round(parseFloat(ratingMatch[1])) : 0;
 
+                            // Walk up to find the review container
+                            // Look for a container that has multiple distinct sections
                             let container = ratingEl;
-                            for (let i = 0; i < 8; i++) {
+                            for (let i = 0; i < 12; i++) {
                                 container = container.parentElement;
                                 if (!container) break;
                                 const text = container.innerText || '';
-                                if (text.length > 30 && /[A-Za-z]\\*+[A-Za-z0-9]/.test(text)) break;
+                                // A review container typically has >50 chars and contains a date or username
+                                if (text.length > 40 && (
+                                    /\\d{4}-\\d{2}-\\d{2}/.test(text) ||
+                                    /[A-Za-z0-9]\\*+[A-Za-z0-9]/.test(text) ||
+                                    /\\d+\\/\\d+\\/\\d+/.test(text) ||
+                                    /ago/.test(text)
+                                )) break;
                             }
 
-                            if (!container) { debug.skipped_no_container++; return; }
+                            if (!container) return;
                             const fullText = container.innerText || '';
+                            const lines = fullText.split('\\n').map(l => l.trim()).filter(l => l);
 
-                            const usernameMatch = fullText.match(/([A-Za-z]\\*+[A-Za-z0-9])/);
-                            const username = usernameMatch ? usernameMatch[1] : '';
-                            if (!username) { debug.skipped_no_username++; return; }
+                            // Extract username - multiple patterns
+                            let username = '';
+                            // Pattern 1: masked username like J***n or a***2
+                            const maskedMatch = fullText.match(/([A-Za-z0-9]\\*{2,}[A-Za-z0-9])/);
+                            if (maskedMatch) username = maskedMatch[1];
+                            // Pattern 2: short username-like string at start
+                            if (!username && lines.length > 0) {
+                                const firstLine = lines[0];
+                                if (firstLine.length < 30 && firstLine.length > 1 && !/^\\d/.test(firstLine) && !firstLine.includes('Rating')) {
+                                    username = firstLine;
+                                }
+                            }
+                            if (!username) username = 'Anonymous';
 
+                            // Extract date
+                            let date = '';
                             const dateMatch = fullText.match(/(\\d{4}-\\d{2}-\\d{2})/);
-                            const date = dateMatch ? dateMatch[1] : '';
+                            if (dateMatch) {
+                                date = dateMatch[1];
+                            } else {
+                                const relDateMatch = fullText.match(/(\\d+\\s*(?:day|week|month|year|hour|min)s?\\s*ago)/i);
+                                if (relDateMatch) date = relDateMatch[1];
+                            }
 
+                            // Extract item variant
                             let itemVariant = '';
-                            const lines = fullText.split('\\n');
                             for (let i = 0; i < lines.length; i++) {
-                                const trimmed = lines[i].trim();
-                                if (trimmed === 'Item:' || trimmed === 'Item' || trimmed.toLowerCase() === 'item:') {
-                                    for (let j = i + 1; j < lines.length && j < i + 3; j++) {
-                                        const nextLine = lines[j].trim();
-                                        if (nextLine && nextLine.length > 2 && nextLine.length < 80 &&
-                                            !nextLine.includes('Verified') && !/^\\d+$/.test(nextLine)) {
-                                            itemVariant = nextLine;
-                                            break;
-                                        }
-                                    }
-                                    if (itemVariant) break;
-                                }
-                                if (/^Item:\\s*.+/i.test(trimmed)) {
-                                    itemVariant = trimmed.replace(/^Item:\\s*/i, '');
+                                const line = lines[i];
+                                if (/^Item:/i.test(line)) {
+                                    itemVariant = line.replace(/^Item:\\s*/i, '');
+                                    if (!itemVariant && lines[i+1]) itemVariant = lines[i+1];
                                     break;
                                 }
-                                if (/^(Color|Size|Variant|Style):/i.test(trimmed)) {
-                                    itemVariant = trimmed;
+                                if (/^(Color|Size|Variant|Style):/i.test(line)) {
+                                    itemVariant = line;
                                     break;
-                                }
-                                if (!itemVariant && trimmed.length > 5 && trimmed.length < 60 &&
-                                    /^[A-Z][a-z]+[-\\s][A-Z]/.test(trimmed) &&
-                                    !trimmed.includes('Verified') && !trimmed.includes('US') &&
-                                    !trimmed.includes('Rating')) {
-                                    itemVariant = trimmed;
                                 }
                             }
 
+                            // Extract review text - find the longest meaningful line
+                            // that isn't a username, date, or metadata
                             let reviewText = '';
+                            const skipPatterns = [
+                                /^(Verified|Helpful|Reply|Report|Like|Share)/i,
+                                /^(Item:|Color:|Size:|Variant:|Style:)/i,
+                                /^\\d{4}-\\d{2}-\\d{2}$/,
+                                /^\\d+\\s*(day|week|month|year|hour|min)/i,
+                                /^\\d+$/,
+                                /^Rating:/,
+                                /^[A-Za-z0-9]\\*{2,}[A-Za-z0-9]$/,
+                            ];
+
                             for (const line of lines) {
-                                const trimmed = line.trim();
-                                if (trimmed.length < 15) continue;
-                                if (/^(Verified|US|Item:|Color:|Size:|\\d{4}-|\\d+$|Rating:)/.test(trimmed)) continue;
-                                if (/^[A-Za-z]\\*+[A-Za-z0-9]$/.test(trimmed)) continue;
-                                if (trimmed === itemVariant) continue;
-                                if (trimmed.length > reviewText.length) reviewText = trimmed;
+                                if (line.length < 5) continue;
+                                if (line === username) continue;
+                                if (line === itemVariant) continue;
+                                if (line === date) continue;
+                                let skip = false;
+                                for (const pat of skipPatterns) {
+                                    if (pat.test(line)) { skip = true; break; }
+                                }
+                                if (skip) continue;
+                                // Take the longest line as review text
+                                if (line.length > reviewText.length) {
+                                    reviewText = line;
+                                }
                             }
 
-                            if (reviewText.length > 10) {
+                            // Accept reviews with any text (even short ones like "Great!")
+                            if (reviewText.length >= 1 || rating > 0) {
                                 reviews.push({
                                     username,
                                     rating,
-                                    review_text: reviewText,
+                                    review_text: reviewText || '(no text)',
                                     date,
                                     item_variant: itemVariant
                                 });
-                            } else {
-                                debug.skipped_short_text++;
                             }
                         } catch (e) {}
                     });
+
+                    debug.extracted = reviews.length;
+                    debug.method = 'aria-label ratings';
                     return {reviews, debug};
                 }""")
 
@@ -406,91 +459,117 @@ def scrape_reviews_with_progress(job_id, product_url, max_pages=50):
                 if current_page >= max_pages:
                     break
 
-                # Click Next button
+                # Click Next button - scroll reviews section into view first
                 page.evaluate("window.scrollBy(0, 400)")
-                page.wait_for_timeout(800)
+                page.wait_for_timeout(500)
 
-                clicked = page.evaluate("""() => {
-                    const allElements = document.querySelectorAll('button, a, span, div, li, [role="button"]');
-
-                    for (const el of allElements) {
+                next_page = current_page + 1
+                clicked = page.evaluate(f"""(targetPage) => {{
+                    // Strategy 1: Click the specific page number button
+                    const allClickable = document.querySelectorAll('button, a, span, div, li, [role="button"]');
+                    for (const el of allClickable) {{
                         const text = el.innerText?.trim();
-                        if (text === 'Next' || text === 'Next →' || text === 'Next→' || text === 'next') {
+                        if (text === String(targetPage)) {{
                             const rect = el.getBoundingClientRect();
-                            if (rect.width > 0 && rect.height > 0 && rect.top > 200) {
-                                el.scrollIntoView({block: 'center'});
+                            // Must be visible and in the lower part of the page (review area)
+                            if (rect.width > 0 && rect.width < 80 && rect.height > 0 && rect.top > 200) {{
+                                el.scrollIntoView({{block: 'center'}});
                                 el.click();
-                                return true;
-                            }
-                        }
-                    }
+                                return 'page_number';
+                            }}
+                        }}
+                    }}
 
-                    for (const el of allElements) {
+                    // Strategy 2: Find "Next" text button
+                    for (const el of allClickable) {{
                         const text = el.innerText?.trim();
-                        if (text === '→' || text === '>' || text === '›' || text === '»') {
+                        if (text === 'Next' || text === 'next' || text === 'Next page') {{
                             const rect = el.getBoundingClientRect();
-                            if (rect.width > 0 && rect.height > 0 && rect.top > 200) {
-                                el.scrollIntoView({block: 'center'});
+                            if (rect.width > 0 && rect.height > 0 && rect.top > 200) {{
+                                el.scrollIntoView({{block: 'center'}});
                                 el.click();
-                                return true;
-                            }
-                        }
-                    }
+                                return 'next_text';
+                            }}
+                        }}
+                    }}
 
-                    const paginationContainers = document.querySelectorAll('[class*="pagination"], [class*="Pagination"], [class*="pager"], [class*="Pager"]');
-                    for (const container of paginationContainers) {
-                        const buttons = container.querySelectorAll('button, a, li, span');
-                        const buttonArray = Array.from(buttons);
-                        for (let i = 0; i < buttonArray.length; i++) {
-                            const btn = buttonArray[i];
-                            if (btn.classList.contains('active') || btn.getAttribute('aria-current') === 'true' ||
-                                btn.classList.contains('selected') || btn.classList.contains('current')) {
-                                if (buttonArray[i + 1]) {
-                                    buttonArray[i + 1].scrollIntoView({block: 'center'});
-                                    buttonArray[i + 1].click();
-                                    return true;
-                                }
-                            }
-                        }
-                    }
+                    // Strategy 3: Find arrow buttons (>, ›, »)
+                    for (const el of allClickable) {{
+                        const text = el.innerText?.trim();
+                        if (text === '>' || text === '›' || text === '»' || text === '→') {{
+                            const rect = el.getBoundingClientRect();
+                            if (rect.width > 0 && rect.height > 0 && rect.top > 200) {{
+                                el.scrollIntoView({{block: 'center'}});
+                                el.click();
+                                return 'arrow';
+                            }}
+                        }}
+                    }}
 
-                    const svgButtons = document.querySelectorAll('button svg, a svg');
-                    for (const svg of svgButtons) {
-                        const parent = svg.closest('button, a');
-                        if (parent) {
-                            const rect = parent.getBoundingClientRect();
-                            if (rect.width > 0 && rect.height > 0 && rect.top > 200) {
-                                const siblingText = parent.parentElement?.innerText || '';
-                                if (siblingText.includes('Next') || parent.getAttribute('aria-label')?.toLowerCase().includes('next')) {
-                                    parent.scrollIntoView({block: 'center'});
-                                    parent.click();
-                                    return true;
-                                }
-                            }
-                        }
-                    }
-
-                    for (const el of allElements) {
+                    // Strategy 4: Find next button by aria-label
+                    for (const el of allClickable) {{
                         const aria = (el.getAttribute('aria-label') || '').toLowerCase();
-                        if (aria.includes('next page') || aria.includes('go to next')) {
+                        if (aria.includes('next') && (aria.includes('page') || aria.includes('review'))) {{
                             const rect = el.getBoundingClientRect();
-                            if (rect.width > 0 && rect.height > 0 && rect.top > 200) {
-                                el.scrollIntoView({block: 'center'});
+                            if (rect.width > 0 && rect.height > 0 && rect.top > 200) {{
+                                el.scrollIntoView({{block: 'center'}});
                                 el.click();
-                                return true;
-                            }
-                        }
-                    }
+                                return 'aria_next';
+                            }}
+                        }}
+                    }}
 
-                    return false;
-                }""")
+                    // Strategy 5: Find active/current page and click next sibling
+                    const containers = document.querySelectorAll('[class*="pagination"], [class*="Pagination"], [class*="pager"], [class*="page"], nav');
+                    for (const container of containers) {{
+                        const buttons = container.querySelectorAll('button, a, li, span, div');
+                        const arr = Array.from(buttons).filter(b => {{
+                            const r = b.getBoundingClientRect();
+                            return r.width > 0 && r.height > 0 && r.top > 200;
+                        }});
+                        for (let i = 0; i < arr.length; i++) {{
+                            const btn = arr[i];
+                            const isActive = btn.classList.contains('active') ||
+                                btn.getAttribute('aria-current') === 'true' ||
+                                btn.getAttribute('aria-current') === 'page' ||
+                                btn.classList.contains('selected') ||
+                                btn.classList.contains('current') ||
+                                window.getComputedStyle(btn).fontWeight >= 700;
+                            if (isActive && arr[i + 1]) {{
+                                arr[i + 1].scrollIntoView({{block: 'center'}});
+                                arr[i + 1].click();
+                                return 'active_sibling';
+                            }}
+                        }}
+                    }}
+
+                    // Strategy 6: SVG arrow in button
+                    const svgButtons = document.querySelectorAll('button svg, a svg, [role="button"] svg');
+                    for (const svg of svgButtons) {{
+                        const parent = svg.closest('button, a, [role="button"]');
+                        if (parent) {{
+                            const rect = parent.getBoundingClientRect();
+                            if (rect.width > 0 && rect.height > 0 && rect.top > 200) {{
+                                const aria = (parent.getAttribute('aria-label') || '').toLowerCase();
+                                const text = parent.parentElement?.innerText || '';
+                                if (aria.includes('next') || text.includes('Next') || text.includes('next')) {{
+                                    parent.scrollIntoView({{block: 'center'}});
+                                    parent.click();
+                                    return 'svg_next';
+                                }}
+                            }}
+                        }}
+                    }}
+
+                    return null;
+                }}""", next_page)
 
                 if clicked:
-                    print(f"[{job_id}] Clicked next, waiting for page {current_page + 1}...")
+                    print(f"[{job_id}] Pagination click: {clicked} -> page {current_page + 1}")
                     page.wait_for_timeout(2000)
                     current_page += 1
                 else:
-                    print(f"[{job_id}] No next button found after page {current_page}")
+                    print(f"[{job_id}] No pagination found after page {current_page}")
                     job['message'] = 'No more pages found'
                     break
 
