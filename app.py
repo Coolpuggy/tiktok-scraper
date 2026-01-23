@@ -469,84 +469,108 @@ def scrape_reviews_with_progress(job_id, product_url, max_pages=50):
                     break
 
                 # Click Next button - scroll to make pagination visible
-                # First try to scroll the pagination area into view
                 page.evaluate("""() => {
-                    // Find anything that looks like pagination and scroll to it
-                    const candidates = document.querySelectorAll('button, a, [role="button"]');
-                    for (const el of candidates) {
-                        const text = (el.innerText || '').trim();
-                        if (/\\bnext\\b/i.test(text) || text === '>' || text === '›') {
-                            const rect = el.getBoundingClientRect();
-                            if (rect.width > 0 && rect.top > 200) {
-                                el.scrollIntoView({block: 'center'});
-                                return;
-                            }
-                        }
-                    }
-                    // Fallback: scroll down
                     window.scrollBy(0, 400);
                 }""")
                 page.wait_for_timeout(500)
 
                 next_page = current_page + 1
 
-                # First, capture what the pagination area looks like for debugging
+                # Capture full pagination DOM for debugging (stored in job for /debug-dom endpoint)
                 pagination_debug = page.evaluate("""() => {
-                    const info = {containers: [], allButtons: []};
+                    const result = {
+                        page_numbers: [],
+                        next_prev: [],
+                        full_html: '',
+                        all_near_numbers: []
+                    };
 
-                    // Find all potential pagination containers
-                    const allEls = document.querySelectorAll('*');
-                    for (const el of allEls) {
-                        const cls = el.className || '';
-                        if (typeof cls === 'string' && (cls.toLowerCase().includes('paginat') || cls.toLowerCase().includes('pager'))) {
+                    // Find all numbered elements
+                    const clickables = document.querySelectorAll('button, a, span, li, div, [role="button"]');
+                    const numbered = [];
+                    for (const el of clickables) {
+                        const text = (el.innerText || '').trim();
+                        if (/^\\d+$/.test(text)) {
+                            const rect = el.getBoundingClientRect();
+                            if (rect.width > 0 && rect.width < 100 && rect.top > 300) {
+                                numbered.push({el, rect, text});
+                                result.page_numbers.push({
+                                    text,
+                                    tag: el.tagName,
+                                    class: (el.className || '').substring(0, 150),
+                                    top: Math.round(rect.top),
+                                    left: Math.round(rect.left),
+                                    outerHTML: el.outerHTML.substring(0, 200)
+                                });
+                            }
+                        }
+                    }
+
+                    // Find Next/Previous elements
+                    for (const el of clickables) {
+                        const text = (el.innerText || el.textContent || '').trim();
+                        if (/next|prev|previous|←|→|›|»/i.test(text) && text.length < 50) {
                             const rect = el.getBoundingClientRect();
                             if (rect.width > 0 && rect.top > 200) {
-                                info.containers.push({
+                                result.next_prev.push({
+                                    text: text.substring(0, 50),
                                     tag: el.tagName,
-                                    class: cls.substring(0, 100),
-                                    html: el.innerHTML.substring(0, 500),
-                                    childCount: el.children.length,
-                                    top: Math.round(rect.top)
-                                });
-                            }
-                        }
-                    }
-
-                    // Find all visible buttons/links in the review area
-                    const clickables = document.querySelectorAll('button, a, [role="button"]');
-                    for (const el of clickables) {
-                        const rect = el.getBoundingClientRect();
-                        if (rect.width > 0 && rect.height > 0 && rect.top > 400 && rect.width < 100) {
-                            const text = (el.innerText || '').trim();
-                            const aria = el.getAttribute('aria-label') || '';
-                            const hasSvg = el.querySelector('svg') ? true : false;
-                            const disabled = el.disabled || el.getAttribute('aria-disabled') === 'true' || el.classList.contains('disabled');
-                            if (text.length < 20 || hasSvg || aria) {
-                                info.allButtons.push({
-                                    tag: el.tagName,
-                                    text: text.substring(0, 30),
-                                    aria,
-                                    hasSvg,
-                                    disabled,
-                                    class: (el.className || '').substring(0, 80),
+                                    class: (el.className || '').substring(0, 150),
+                                    ariaLabel: el.getAttribute('aria-label') || '',
+                                    disabled: el.disabled || el.getAttribute('aria-disabled') === 'true',
+                                    top: Math.round(rect.top),
+                                    left: Math.round(rect.left),
                                     width: Math.round(rect.width),
-                                    height: Math.round(rect.height),
-                                    top: Math.round(rect.top)
+                                    outerHTML: el.outerHTML.substring(0, 400)
                                 });
                             }
                         }
                     }
 
-                    return info;
+                    // Get full pagination container HTML
+                    if (numbered.length > 0) {
+                        let container = numbered[0].el;
+                        for (let i = 0; i < 8; i++) {
+                            container = container.parentElement;
+                            if (!container) break;
+                            const nums = container.querySelectorAll('button, a, span, [role="button"]');
+                            let numCount = 0;
+                            for (const n of nums) {
+                                if (/^\\d+$/.test((n.innerText || '').trim())) numCount++;
+                            }
+                            if (numCount >= 2 && container.getBoundingClientRect().width > 100) {
+                                result.full_html = container.outerHTML.substring(0, 5000);
+                                break;
+                            }
+                        }
+
+                        // Find ALL elements at the same vertical level as page numbers
+                        const targetTop = numbered[0].rect.top;
+                        for (const el of clickables) {
+                            const rect = el.getBoundingClientRect();
+                            if (Math.abs(rect.top - targetTop) < 30 && rect.width > 0) {
+                                result.all_near_numbers.push({
+                                    text: (el.innerText || '').trim().substring(0, 50),
+                                    tag: el.tagName,
+                                    class: (el.className || '').substring(0, 100),
+                                    ariaLabel: el.getAttribute('aria-label') || '',
+                                    left: Math.round(rect.left),
+                                    width: Math.round(rect.width),
+                                    outerHTML: el.outerHTML.substring(0, 300)
+                                });
+                            }
+                        }
+                    }
+
+                    return result;
                 }""")
-                print(f"[{job_id}] Pagination debug (page {current_page}): containers={len(pagination_debug.get('containers', []))}, buttons={len(pagination_debug.get('allButtons', []))}")
-                if pagination_debug.get('containers'):
-                    for c in pagination_debug['containers'][:2]:
-                        print(f"[{job_id}]   Container: {c.get('tag')} class={c.get('class','')[:60]} children={c.get('childCount')}")
-                        print(f"[{job_id}]   HTML preview: {c.get('html','')[:200]}")
-                if pagination_debug.get('allButtons'):
-                    for b in pagination_debug['allButtons']:
-                        print(f"[{job_id}]   Button: tag={b.get('tag')} text='{b.get('text')}' aria='{b.get('aria')}' svg={b.get('hasSvg')} disabled={b.get('disabled')} class={b.get('class','')[:50]}")
+
+                # Store debug info in job for retrieval via /debug-dom endpoint
+                job['_pagination_debug'] = pagination_debug
+                print(f"[{job_id}] Page {current_page} pagination: numbers={[p['text'] for p in pagination_debug.get('page_numbers', [])]}")
+                print(f"[{job_id}] Next/Prev elements: {[(n['text'][:20], n['tag'], n.get('disabled')) for n in pagination_debug.get('next_prev', [])]}")
+                if pagination_debug.get('full_html'):
+                    print(f"[{job_id}] Pagination HTML: {pagination_debug['full_html'][:500]}")
 
                 clicked = page.evaluate(f"""(targetPage) => {{
                     // Strategy 1: Find a button/link whose text contains "Next" (handles "Next →" too)
@@ -854,7 +878,13 @@ def debug_dom(job_id):
         return jsonify({'error': 'Job not found'}), 404
 
     job = scrape_jobs[job_id]
-    return jsonify(job.get('_dom_debug', {'message': 'No debug info yet - job may still be loading'}))
+    return jsonify({
+        'dom_debug': job.get('_dom_debug', {}),
+        'pagination_debug': job.get('_pagination_debug', {}),
+        'status': job.get('status'),
+        'current_page': job.get('current_page'),
+        'review_count': job.get('review_count'),
+    })
 
 
 @app.route('/health')
