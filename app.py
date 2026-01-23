@@ -15,6 +15,7 @@ from urllib.parse import urlparse
 app = Flask(__name__)
 CORS(app)  # Enable CORS for Framly to call this API
 
+
 # Store for scraping progress and results
 scrape_jobs = {}
 
@@ -56,12 +57,32 @@ def scrape_reviews_with_progress(job_id, product_url, max_pages=50):
     chrome_options.add_argument("--disable-gpu")
     chrome_options.add_argument("--window-size=1920,1080")
     chrome_options.add_argument("--disable-blink-features=AutomationControlled")
-    chrome_options.add_argument("--disable-extensions")
     chrome_options.add_argument("--disable-software-rasterizer")
     chrome_options.add_argument("--remote-debugging-port=9222")
     chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
     chrome_options.add_experimental_option('useAutomationExtension', False)
     chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+
+    # Configure residential proxy if available (Bright Data format)
+    # BRIGHT_DATA_PROXY format: username:password@host:port
+    proxy_url = os.environ.get('BRIGHT_DATA_PROXY')
+    seleniumwire_options = None
+    use_wire = False
+    if proxy_url:
+        try:
+            seleniumwire_options = {
+                'proxy': {
+                    'http': f'http://{proxy_url}',
+                    'https': f'http://{proxy_url}',
+                    'no_proxy': 'localhost,127.0.0.1'
+                }
+            }
+            use_wire = True
+            print(f"[{job_id}] Using residential proxy via selenium-wire")
+        except Exception as e:
+            print(f"[{job_id}] Proxy config error: {e}, continuing without proxy")
+    else:
+        print(f"[{job_id}] No proxy configured (set BRIGHT_DATA_PROXY env var)")
 
     # Check if running in Docker/Railway (Chrome installed at system level)
     chrome_bin = os.environ.get('CHROME_BIN') or os.environ.get('GOOGLE_CHROME_BIN')
@@ -69,17 +90,33 @@ def scrape_reviews_with_progress(job_id, product_url, max_pages=50):
         chrome_options.binary_location = chrome_bin
 
     try:
-        # Try to use system Chrome first (for Railway), fall back to webdriver-manager
-        try:
-            from selenium.webdriver.chrome.service import Service as ChromeService
-            driver = webdriver.Chrome(options=chrome_options)
-        except Exception:
-            service = Service(ChromeDriverManager().install())
-            driver = webdriver.Chrome(service=service, options=chrome_options)
+        if use_wire:
+            from seleniumwire import webdriver as wire_webdriver
+            try:
+                driver = wire_webdriver.Chrome(
+                    options=chrome_options,
+                    seleniumwire_options=seleniumwire_options
+                )
+            except Exception:
+                service = Service(ChromeDriverManager().install())
+                driver = wire_webdriver.Chrome(
+                    service=service,
+                    options=chrome_options,
+                    seleniumwire_options=seleniumwire_options
+                )
+        else:
+            # No proxy - use standard selenium
+            try:
+                driver = webdriver.Chrome(options=chrome_options)
+            except Exception:
+                service = Service(ChromeDriverManager().install())
+                driver = webdriver.Chrome(service=service, options=chrome_options)
         driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
     except Exception as e:
         job['status'] = 'error'
         job['message'] = f'Failed to start browser: {str(e)}'
+        import traceback
+        traceback.print_exc()
         return
 
     reviews = []
@@ -485,7 +522,10 @@ def stream_status(job_id):
 @app.route('/health')
 def health():
     """Health check endpoint for Railway."""
-    return jsonify({'status': 'ok'})
+    return jsonify({
+        'status': 'ok',
+        'proxy_configured': bool(os.environ.get('BRIGHT_DATA_PROXY'))
+    })
 
 
 if __name__ == '__main__':
