@@ -100,12 +100,13 @@ def scrape_reviews_with_progress(job_id, product_url, max_pages=50):
             print(f"[{job_id}] Navigating to: {product_url}")
 
             try:
-                page.goto(product_url, timeout=60000, wait_until='domcontentloaded')
+                page.goto(product_url, timeout=30000, wait_until='commit')
+                print(f"[{job_id}] Page navigation committed")
+                # Wait a bit for content to render
+                page.wait_for_timeout(3000)
             except Exception as nav_err:
-                print(f"[{job_id}] Navigation error: {nav_err}")
-                # Even if goto times out, page might have partially loaded
-
-            page.wait_for_timeout(2000)
+                print(f"[{job_id}] Navigation error (continuing anyway): {nav_err}")
+                page.wait_for_timeout(2000)
 
             # Take initial screenshot
             try:
