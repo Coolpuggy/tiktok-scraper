@@ -35,15 +35,6 @@ def extract_product_id(url):
     return None
 
 
-def get_proxy_url():
-    """Get residential proxy URL from environment."""
-    proxy = os.environ.get('BRIGHT_DATA_PROXY')
-    if proxy:
-        # Format: user:pass@host:port
-        if not proxy.startswith('http'):
-            proxy = f"http://{proxy}"
-        return proxy
-    return None
 
 
 def scrape_reviews_with_progress(job_id, product_url, max_pages=50):
@@ -73,16 +64,10 @@ def scrape_reviews_with_progress(job_id, product_url, max_pages=50):
                 '--disable-blink-features=AutomationControlled',
             ]
 
-            proxy_url = get_proxy_url()
-            proxy_config = None
-            if proxy_url:
-                proxy_config = {"server": proxy_url}
-                print(f"[{job_id}] Using residential proxy: {proxy_url.split('@')[-1] if '@' in proxy_url else proxy_url}")
-
+            # Launch browser (without proxy - user solves CAPTCHA manually)
             browser = p.chromium.launch(
                 headless=True,
                 args=launch_args,
-                proxy=proxy_config,
             )
 
             context = browser.new_context(
@@ -96,17 +81,17 @@ def scrape_reviews_with_progress(job_id, product_url, max_pages=50):
 
             # Navigate to product page
             job['status'] = 'captcha'
-            job['message'] = 'Loading page - please solve CAPTCHA if shown...'
+            job['message'] = 'Loading page...'
             print(f"[{job_id}] Navigating to: {product_url}")
 
             try:
-                page.goto(product_url, timeout=30000, wait_until='commit')
-                print(f"[{job_id}] Page navigation committed")
-                # Wait a bit for content to render
-                page.wait_for_timeout(3000)
+                page.goto(product_url, timeout=30000, wait_until='domcontentloaded')
+                print(f"[{job_id}] Page loaded")
             except Exception as nav_err:
-                print(f"[{job_id}] Navigation error (continuing anyway): {nav_err}")
-                page.wait_for_timeout(2000)
+                print(f"[{job_id}] Navigation timeout (continuing): {nav_err}")
+
+            page.wait_for_timeout(2000)
+            job['message'] = 'Please solve the CAPTCHA if shown...'
 
             # Take initial screenshot
             try:
@@ -616,10 +601,7 @@ def stream_status(job_id):
 @app.route('/health')
 def health():
     """Health check endpoint."""
-    return jsonify({
-        'status': 'ok',
-        'proxy_configured': bool(get_proxy_url()),
-    })
+    return jsonify({'status': 'ok'})
 
 
 if __name__ == '__main__':
